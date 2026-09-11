@@ -22,7 +22,8 @@ package, or another `Ozakboy.*` package.
 | Placing, cancelling, and querying orders; cancel-all and open orders | Done |
 | Leverage and margin mode | Done |
 | Conditional order parameter mapping (stop, take-profit, trailing) | Done, but the endpoint no longer accepts them — see below |
-| WebSocket market streams and user data streams | Next stage |
+| WebSocket market streams: klines and mark prices | Done |
+| WebSocket user data streams | Next stage |
 
 The client implements the whole of `IExchangeClient`. Every price, quantity, and amount is a `decimal`, and
 every timestamp is UTC.
@@ -99,6 +100,54 @@ await client.CancelOrderAsync(order.Symbol, order.GetIdentifier());
 Normalising beforehand is optional: `PlaceOrderAsync` fetches the symbol's rules, aligns the quantity down to
 the step size and the price to the tick, and fails outright when the result falls below the minimum quantity or
 notional instead of sending it to be rejected.
+
+## Market data
+
+`BinanceMarketDataFeed` implements `IMarketDataFeed`: historical klines over REST, live klines and mark prices
+over WebSocket. Register it after `AddBinanceFutures` — it is a separate call because market streams open
+long-lived connections, and a host that only wants trading rules should not have to carry a WebSocket client.
+
+```csharp
+services.AddBinanceFutures(options => options.Environment = BinanceEnvironment.Testnet);
+services.AddBinanceMarketData();
+```
+
+```csharp
+var feed = provider.GetRequiredService<IMarketDataFeed>();
+
+await foreach (var item in feed.SubscribeKlinesAsync(["BTCUSDT", "ETHUSDT"], KlineInterval.FifteenMinutes, ct))
+{
+    if (!item.TryGetValue(out var candle))
+    {
+        logger.LogWarning("Market stream: {Error}", item.Error);
+
+        // A gap being repaired, or the end of the stream. IsTransient is what tells them apart.
+        if (!item.Error!.IsTransient)
+        {
+            break;
+        }
+
+        continue;
+    }
+
+    // Only a closed candle is a candle. See below.
+    if (!candle.IsClosed)
+    {
+        continue;
+    }
+
+    strategy.OnCandle(candle);
+}
+```
+
+Market streams are public and need no credentials. Connection management — reconnection with backoff and
+jitter, subscription replay after a reconnect, idle-timeout liveness detection, and bounded-queue backpressure
+— comes from [`Ozakboy.WebSockets`](https://github.com/ozakboy/Ozakboy.WebSockets) and is not reimplemented
+here. What this package owns is the Binance protocol: stream names, the path to dial, the envelope, and the
+abbreviated field names.
+
+Tuning lives on `BinanceMarketStreamOptions`: the heartbeat interval, the idle timeout, the reconnect ceiling,
+the queue capacity and backpressure strategy, and whether mark prices use the one-second stream.
 
 ## Design decisions worth knowing
 
@@ -263,6 +312,54 @@ calculated, which is a hole in risk control rather than a rounding preference.
 A result below the minimum quantity or notional fails here rather than travelling to the exchange to be
 rejected, which saves a round trip and a unit of rate-limit quota.
 
+### Only a closed candle is a candle
+
+A live kline stream keeps pushing the same in-progress candle, each push carrying the latest price as its
+close. `Kline.IsClosed` is `false` on every one of them and `true` only on the last. Feeding an unfinished
+candle to an indicator produces a signal that flips back and forth inside one candle, and the strategy enters
+and exits with it.
+
+This is the easiest thing here to get wrong and the hardest to notice. Across the pushes of one candle
+everything but the flag is identical, so hard-coding it leaves prices, volumes, and timestamps all correct and
+no assertion failing — and a backtest, which runs on closed data, stays green through it. A missing `x` field
+is therefore a parse failure rather than a default: guessing `false` makes a strategy skip every candle, which
+is a silent shutdown, and guessing `true` makes it trade inside every one.
+
+The same applies to `GetKlinesAsync`, whose REST response carries **no** closed flag at all and whose last
+candle is usually still ticking. `IsClosed` is derived there by comparing the close time against the injected
+time source. Treating the whole list as closed records "the latest price when the query ran" as a close, and
+stored as history that makes later backtests run on a candle that never existed.
+
+### The stream path is the one that was measured, not the one in the documentation
+
+Dialling `wss://stream.binancefuture.com/stream` and subscribing with a `SUBSCRIBE` control message was
+verified on 2026-09-11 by actually receiving data. The `/public/ws/…` and `/public/stream…` forms carried by
+the current documentation page behave in that environment in the worst possible way: the handshake succeeds,
+the `SUBSCRIBE` is even acknowledged with `{"result":null,"id":1}`, and no market data ever arrives. No error,
+no disconnect, just a price that never moves. The verified paths are therefore hard-coded rather than
+assembled from configuration.
+
+Two more measured details. The envelope follows the **path**, not the number of streams: `/stream` wraps every
+frame in `{"stream":…,"data":…}` even for a single subscription, while `/ws` wraps none even for ten. And the
+separator inside `streams=` must be a slash; a comma fails the handshake outright.
+
+### Liveness is a heartbeat, because a quiet market looks exactly like a dead socket
+
+`ClientWebSocket` answers the peer's pings by itself, invisibly, so the only liveness signal available to the
+application is how long it has been since any message arrived. But kline pushes only happen when trades
+happen, and a quiet symbol can go minutes without one — at which point an idle timeout condemns a healthy
+connection and the client settles into a disconnect-reconnect loop. A `LIST_SUBSCRIPTIONS` is therefore sent on
+a timer: it always draws a reply, the reply refreshes the idle clock, and a genuinely dead connection is still
+caught.
+
+### A dropped message is republished as a gap
+
+Under backpressure the connection layer drops messages and reports that on an event and in its statistics —
+neither of which an `await foreach` can see. The message dropped may well be a closed candle, the only kind a
+strategy trades on, and losing one raises no error at all; it just silently skips a trade that should have
+happened. Drops are therefore re-published as a transient failure on the stream itself, saying how many were
+lost.
+
 ## Testing
 
 Contract tests replay recorded responses and never touch the network. **Every fixture is a genuine recording**:
@@ -281,9 +378,18 @@ fill; every one is cancelled in a `finally` block even when an assertion fails; 
 `pulsetrade-test-` prefix so a stray order is traceable; and a closing test plus a `ClassCleanup` query **every
 symbol** for open orders to confirm that nothing was left behind.
 
+The market data tests are the exception to the credential rule: market streams are public, so the
+`[TestCategory("Testnet")]` tests that subscribe to klines and mark prices run with no key at all. One of them
+waits for a one-minute candle to close and asserts on a live connection that `IsClosed` was `false` throughout
+the candle and `true` on its closing push.
+
+Unit tests never touch the network, streams included: `Ozakboy.WebSockets` factors connection creation behind
+`IWebSocketConnectionFactory`, and a fake one drives the whole subscription path — register, connect, replay
+the `SUBSCRIBE`, receive, parse, hand to the consumer — offline.
+
 ```
 dotnet test                                    # offline contract tests
-dotnet test --filter "TestCategory=Testnet"    # requires credentials
+dotnet test --filter "TestCategory=Testnet"    # market data needs no key; trading needs credentials
 ```
 
 ## Security

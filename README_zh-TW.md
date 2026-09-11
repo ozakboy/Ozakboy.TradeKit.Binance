@@ -22,7 +22,8 @@
 | 下單、撤單、撤銷全部掛單、查單、查未結委託 | 已完成 |
 | 改槓桿與保證金模式 | 已完成 |
 | 條件單(停損、停利、移動停損)的參數對映 | 已完成,但端點已不受理(見下方) |
-| WebSocket 行情與使用者資料串流 | 下一階段 |
+| WebSocket 行情串流:K 線與標記價 | 完成 |
+| WebSocket 使用者資料串流 | 下一階段 |
 
 用戶端已實作完整的 `IExchangeClient`。所有價格、數量與金額都是 `decimal`,所有時間都是 UTC。
 
@@ -95,6 +96,52 @@ await client.CancelOrderAsync(order.Symbol, order.GetIdentifier());
 
 價量不必自己先校正:`PlaceOrderAsync` 會取該商品的交易規則,把數量向下對齊步進、價格對齊跳動點,
 並在校正後低於最小下單量或最小名目價值時直接失敗,不送出去換一次拒單。
+
+## 行情資料
+
+`BinanceMarketDataFeed` 實作 `IMarketDataFeed`:歷史 K 線走 REST,即時 K 線與標記價走 WebSocket。
+註冊要接在 `AddBinanceFutures` 之後,而且是獨立的一個呼叫 —— 行情串流會開長命連線,
+只想查交易規則的宿主不該被迫帶上一個 WebSocket 客戶端。
+
+```csharp
+services.AddBinanceFutures(options => options.Environment = BinanceEnvironment.Testnet);
+services.AddBinanceMarketData();
+```
+
+```csharp
+var feed = provider.GetRequiredService<IMarketDataFeed>();
+
+await foreach (var item in feed.SubscribeKlinesAsync(["BTCUSDT", "ETHUSDT"], KlineInterval.FifteenMinutes, ct))
+{
+    if (!item.TryGetValue(out var candle))
+    {
+        logger.LogWarning("行情串流:{Error}", item.Error);
+
+        // 「有缺口、還在重連」與「這條串流結束了」靠 IsTransient 分辨。
+        if (!item.Error!.IsTransient)
+        {
+            break;
+        }
+
+        continue;
+    }
+
+    // 只有收盤的 K 線才是 K 線,理由見下。
+    if (!candle.IsClosed)
+    {
+        continue;
+    }
+
+    strategy.OnCandle(candle);
+}
+```
+
+行情是公開端點,不需要憑證。連線管理 —— 自動重連與退避抖動、重連後重放訂閱、閒置逾時存活偵測、
+有界佇列背壓 —— 全部由 [`Ozakboy.WebSockets`](https://github.com/ozakboy/Ozakboy.WebSockets) 負責,
+本套件不重做;本套件負責的是幣安的協定細節:串流名稱、路徑走哪一條、外層包裝怎麼拆、欄位縮寫怎麼對映。
+
+可調的參數在 `BinanceMarketStreamOptions`:心跳間隔、閒置逾時、重連次數上限、佇列容量與背壓策略,
+以及標記價要不要用每秒更新的串流。
 
 ## 幾個值得知道的設計決定
 
@@ -243,6 +290,47 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 校正後低於最小下單量或最小名目價值時,直接回傳失敗而不是送出去被拒 ——
 省的不只是一趟往返,還有一份限流額度。
 
+### 只有收盤的 K 線才是 K 線
+
+即時串流會不斷推送同一根還在跳動的 K 線,每一筆的收盤價都是當下最新價。
+`Kline.IsClosed` 在這些推送上一律是 `false`,只有最後一筆是 `true`。
+拿未收盤的 K 線去算指標,訊號會在同一根 K 線內反覆翻面,策略就跟著反覆進出場。
+
+這是這一塊最容易出錯、也最難發現的一點。同一根 K 線的各筆推送除了旗標之外完全相同,
+所以把旗標寫死之後,價格、成交量、時間全部照樣正確,沒有任何斷言會掉 ——
+而回測用的是收盤資料,連回測都一路綠燈。因此 `x` 欄位缺席一律判為解析失敗,絕不填預設值:
+猜 `false` 會讓策略永遠等不到收盤的 K 線(功能靜默停擺),猜 `true` 會讓它在每一根 K 線內反覆下單。
+
+`GetKlinesAsync` 同理,而且更隱蔽:REST 回應**根本沒有**收盤旗標,最後一根通常還在跳動。
+這裡的 `IsClosed` 是用收盤時間與注入的時間來源比對出來的。把整串都當成已收盤,
+等於把「查詢當下的最新價」寫成收盤價;存進歷史之後,之後的回測會用一根從未存在的 K 線。
+
+### 串流路徑是實測出來的,不是照文件抄的
+
+連 `wss://stream.binancefuture.com/stream` 並以 `SUBSCRIBE` 控制訊息訂閱,於 2026-09-11 實際收到資料驗證。
+文件目前刊載的 `/public/ws/…` 與 `/public/stream…` 在這個環境下的失敗方式最壞:
+握手成功、`SUBSCRIBE` 還回了 `{"result":null,"id":1}` 表示受理,然後一筆行情都不送。
+沒有錯誤、沒有斷線,只有永遠不動的價格。因此已驗證的路徑寫死在程式碼裡,不由設定拼裝。
+
+另外兩個實測到的細節。外層包裝由**路徑**決定,與訂閱幾檔無關:走 `/stream` 就算只訂一檔,
+每則訊息仍包在 `{"stream":…,"data":…}` 裡;走 `/ws` 就算訂十檔也沒有包裝。
+而 `streams=` 裡的分隔符號必須是斜線,換成逗號連握手都不會成功。
+
+### 存活偵測靠心跳,因為冷清的市場和死掉的連線長得一模一樣
+
+`ClientWebSocket` 會自動回應對方的 ping,應用層完全看不到,所以唯一能判斷連線死活的訊號是
+「多久沒收到任何訊息」。但 K 線推送只在有成交時才來,冷門標的可以安靜好幾分鐘 ——
+這時候閒置逾時會把一條健康的連線判成死的,然後進入「斷線、重連、又被判死」的無效迴圈。
+因此這裡固定送 `LIST_SUBSCRIPTIONS`:它一定會有回覆,回覆會更新閒置計時,
+而真正死掉的連線仍然抓得到。
+
+### 被丟棄的訊息會以「缺口」的形式回到串流上
+
+背壓之下連線層會丟訊息,並以事件與統計回報 —— 這兩者在 `await foreach` 裡都看不到。
+但被丟掉的很可能正是一根已收盤的 K 線,而那是唯一會被策略拿去下單的那種;
+少了它,策略不會報錯,只會少做一次該做的事。所以丟棄會被補成串流上的一筆暫時性失敗,
+並寫明丟了幾則。
+
 ## 測試
 
 合約測試以錄製的回應重播,全程不連網。**所有 fixture 都是真實錄製的**:
@@ -259,9 +347,17 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 即使斷言失敗也一樣;每一張都帶 `pulsetrade-test-` 前綴,萬一留下來看得出來源;
 收尾另有一條測試與一段 `ClassCleanup` 查詢**全部商品**的掛單,確認沒有殘留。
 
+行情測試是「需要憑證」這條規則的例外:行情是公開端點,所以訂閱 K 線與標記價的
+`[TestCategory("Testnet")]` 測試完全不需要金鑰。其中一條會等一根 1m K 線收盤,
+在真實連線上斷言 `IsClosed` 在整根 K 線期間為 `false`、收盤那一筆為 `true`。
+
+單元測試全程不連網,串流也不例外:`Ozakboy.WebSockets` 把建立連線抽成
+`IWebSocketConnectionFactory`,用假工廠就能離線走完整條訂閱路徑
+(登記訂閱 → 連線 → 重放 `SUBSCRIBE` → 收訊息 → 解析 → 交給消費端)。
+
 ```
 dotnet test                                    # 離線合約測試
-dotnet test --filter "TestCategory=Testnet"    # 需要憑證
+dotnet test --filter "TestCategory=Testnet"    # 行情不需金鑰,交易需要憑證
 ```
 
 ## 安全

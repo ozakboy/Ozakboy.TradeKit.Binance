@@ -48,6 +48,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **錯誤碼 / Error codes**:新增 `-4120`(`OrderTypeNotSupportedOnEndpoint`),
   對映成 `TradeErrorCodes.NotSupported` 並附上說明。
 
+- **WebSocket 行情串流 / WebSocket market streams**:新增 `BinanceMarketDataFeed`,實作 `IMarketDataFeed`
+  的三個方法 —— 歷史 K 線走 REST(`GET /fapi/v1/klines`),即時 K 線與標記價走 WebSocket。
+  另有 `AddBinanceMarketData()` 註冊擴充,與 `AddBinanceFutures` 分開:行情串流會開長命連線,
+  只想查交易規則的宿主不該被迫帶上一個 WebSocket 客戶端。
+  連線管理(重連、重連後重放訂閱、閒置逾時存活偵測、有界佇列背壓)一律取自 `Ozakboy.WebSockets` 0.2.0,
+  本套件只負責幣安的協定細節。
+  A new feed implements `IMarketDataFeed`, with REST klines and WebSocket kline and mark price subscriptions;
+  all connection management comes from `Ozakboy.WebSockets` rather than being reimplemented.
+
+- **`Kline.IsClosed` 的正確對映 / The closed flag is mapped, never defaulted**:串流的 `k.x` 直接對映到
+  `Kline.IsClosed`,欄位缺席一律判為解析失敗。REST 的 `klines` 回應**沒有**這個旗標,而且最後一根
+  通常還在跳動,因此以收盤時間與注入的時間來源比對逐根判定。
+  這一點錯了不會有任何徵兆:同一根 K 線的各筆推送除了旗標之外完全相同,價格、成交量、時間照樣正確,
+  而回測用的是收盤資料,連回測都一路綠燈,要到真錢在同一根 K 線內反覆進出場才會被發現。
+  已由單元測試(同一根 K 線的三筆實錄推送)與真實連線的整合測試各鎖一次。
+  The flag is mapped from `k.x` and a missing field fails the parse; the REST response carries no flag at all,
+  so it is derived from the close time. Getting it wrong leaves every number correct and every backtest green.
+
+- **串流路徑以實測定案 / The stream path was settled by measurement**:採用
+  `wss://<host>/stream` + `SUBSCRIBE` 控制訊息。文件刊載的 `/public/ws/…` 與 `/public/stream…`
+  在 Testnet 上握手成功、`SUBSCRIBE` 也回了 `{"result":null,"id":1}`,卻一筆行情都不送 ——
+  沒有錯誤、沒有斷線,只有永遠不動的價格。外層包裝由**路徑**決定而非訂閱數量;
+  `streams=` 的分隔符號必須是斜線,逗號連握手都不會成功。詳見 `BinanceStreamNames` 的註解。
+  The verified paths are hard-coded; the documented `/public/…` forms connect, acknowledge, and deliver nothing.
+
+- **心跳式存活偵測 / Heartbeat liveness**:固定送 `LIST_SUBSCRIPTIONS` 當應用層心跳(預設 30 秒,
+  閒置逾時 90 秒)。K 線只在有成交時才推送,冷門標的可以安靜好幾分鐘,少了心跳就會把健康的連線判死
+  並無止境重連。設定在 `BinanceMarketStreamOptions`,且驗證會擋下「心跳比閒置逾時還慢」的組合。
+
+- **丟棄會回到串流上 / Drops are republished as gaps**:背壓丟掉的訊息在 `Ozakboy.WebSockets` 只出現在
+  事件與統計裡,`await foreach` 看不到。被丟掉的可能正是一根已收盤的 K 線,所以這裡把它補成串流上的
+  一筆暫時性失敗,寫明丟了幾則。
+
+- **左閉右開的時間區間 / The half-open range is honoured**:幣安的 `endTime` 含端點,
+  `KlineQuery` 的區間是左閉右開,因此送出前把結束時間減一毫秒(實測:同一組區間相差一根)。
+  不減的話,連續分頁抓歷史時每一頁的最後一根都會和下一頁的第一根重複,
+  而重複的 K 線在指標裡是一次不存在的價格變動。
+
+- **串流訊息的失敗一律浮上來 / Unreadable frames surface**:解析失敗、非文字訊息、幣安的控制訊息
+  拒絕回覆(`{"error":{"code":…,"msg":…}}`)都會變成串流上的失敗元素,不會被靜默丟棄。
+  控制訊息的拒絕先走既有的 `BinanceErrorMapper`,認得出來的代碼保留更精確的對映
+  (例如 `-1121` 仍對映成 `trade.symbol_not_found`),認不出來的才標成 `trade.subscription_failed`。
+
+- **斷線在串流中現身且分得出終局 / Disconnects are visible and terminal ones are distinguishable**:
+  連線層的失敗對映成 `trade.stream_disconnected` 或 `trade.subscription_failed`,
+  **分類原樣保留**,所以消費端用 `Error.IsTransient` 就能分辨「有缺口、還在重連」與
+  「這條串流結束了」。原始的 `ws.*` 代碼留在 `Error.Data` 的 `innerCode` 裡。
+
 ### 技術改進 / Changed
 
 - **測試 fixture 全面換成真實錄製 / Fixtures are now genuine recordings**:
@@ -66,6 +114,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   並以一條測試加一段 `ClassCleanup` 查詢全部商品確認沒有殘留掛單。
 
 ### 已知限制 / Known limitations
+
+- **主網的行情串流尚未實際連線驗證**。M-1 探測與本階段的驗證都在 Testnet
+  (`wss://stream.binancefuture.com`)上進行;主網 `wss://fstream.binance.com` 在開發機上「連得上、
+  收不到任何 frame」,以 Node 複驗結果相同,判定為本機網路環境問題而非程式問題,尚未排查完成。
+  路徑格式在兩個環境上是同一套,但「同一套」這件事目前只有 Testnet 這一半是實測過的。
+  The market streams were verified on the testnet only; the mainnet host connects but delivers no frames on the
+  development machine, a local network condition that is still unresolved.
+
+- **佇列丟棄的回報路徑沒有單元測試覆蓋**。丟棄要靠「消費端跟不上」才會發生,在單元測試裡無法穩定重現,
+  硬要製造就會寫出時好時壞的測試。失敗物件本身(訊息、分類、診斷資料)有直接測試,
+  串流裡那段「發現丟棄並推出失敗」的接線則是靠閱讀確認的。
+  The drop-reporting path is not covered by a unit test, because a drop needs a consumer that falls behind and
+  that cannot be reproduced deterministically; the failure object itself is tested directly.
 
 - **條件單目前不被 `/fapi/v1/order` 受理**。2026-09-11 在 Testnet 實測,`STOP_MARKET` 與
   `TRAILING_STOP_MARKET` 都回 `-4120`,幣安要求改用 Algo Order 專用端點。
