@@ -108,6 +108,20 @@ public static class BinanceRequestWeights
     public const int AccountSetting = 1;
 
     /// <summary>
+    /// <c>POST</c>、<c>PUT</c>、<c>DELETE</c> <c>/fapi/v1/listenKey</c>(使用者資料串流憑證)。權重 1。
+    /// Weight 1 for the user data stream credential on <c>POST</c>, <c>PUT</c>, and <c>DELETE</c>
+    /// <c>/fapi/v1/listenKey</c>.
+    /// </summary>
+    /// <remarks>
+    /// 三個操作共用一個常數,因為官方文件對三者標的都是 1。續期每 30 分鐘一次,對限流桶幾乎沒有影響;
+    /// 這裡仍然宣告,是因為本套件的規矩是「每個請求都要宣告權重」—— 一個沒宣告的請求就是本地限流器算不到的請求。
+    /// One constant covers all three because the documentation gives each of them a weight of 1. Renewal happens
+    /// twice an hour and barely touches the bucket; it is declared anyway because the rule in this package is
+    /// that every request declares its weight, and an undeclared request is one the local limiter cannot count.
+    /// </remarks>
+    public const int ListenKey = 1;
+
+    /// <summary>
     /// 未宣告權重時的預設值。
     /// The weight assumed when a request declares none.
     /// </summary>
