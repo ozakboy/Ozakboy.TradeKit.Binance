@@ -206,10 +206,24 @@ public static class BinanceStreamNames
     /// <param name="streamName">串流名稱。The stream name.</param>
     /// <returns>連線位址。The address to dial.</returns>
     /// <remarks>
-    /// 本套件的訂閱不走這條路徑,它保留給診斷用途:走 <c>/ws/</c> 收到的訊息沒有外層包裝,
-    /// 手動比對原始欄位時比較直接。
-    /// The subscriptions in this package do not use this path; it is kept for diagnostics, where the absence of
-    /// an envelope on <c>/ws/</c> makes raw fields easier to compare by hand.
+    /// <para>
+    /// 行情訂閱不走這條路徑(行情走 <see cref="CombinedStreamUri"/> 加 <c>SUBSCRIBE</c>),
+    /// 但<b>使用者資料串流用它撥號</b>:<see cref="BinanceUserDataFeed"/> 以 listenKey 當串流名稱,
+    /// 連上 <c>{WebSocketBaseUri}/ws/{listenKey}</c>。走 <c>/ws/</c> 收到的訊息沒有外層包裝,
+    /// 事件物件就是最外層,手動比對原始欄位時也比較直接。
+    /// Market subscriptions do not use this path — they go through <see cref="CombinedStreamUri"/> plus
+    /// <c>SUBSCRIBE</c> — but <b>the user data stream dials it</b>: <see cref="BinanceUserDataFeed"/> passes the
+    /// listenKey as the stream name and connects to <c>{WebSocketBaseUri}/ws/{listenKey}</c>. Frames on
+    /// <c>/ws/</c> carry no envelope, so the event object is the outermost one, which also makes raw fields easier
+    /// to compare by hand.
+    /// </para>
+    /// <para>
+    /// 因此這個方法的回傳值<b>可能含有憑證</b>:拿它當串流名稱時,產生的 <see cref="Uri"/> 本身就是祕密,
+    /// 不可以寫進錯誤訊息、診斷資料或日誌。
+    /// Its return value can therefore <b>carry a credential</b>: when the stream name is a listenKey, the
+    /// resulting <see cref="Uri"/> is itself a secret and must not reach an error message, diagnostic data, or a
+    /// log.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="webSocketBaseUri"/> 為 <see langword="null"/> 時擲出。

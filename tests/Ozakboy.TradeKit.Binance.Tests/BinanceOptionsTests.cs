@@ -166,10 +166,15 @@ public sealed class BinanceOptionsTests
         Assert.Contains("signature", logging.AdditionalSensitiveParameterNames);
         Assert.Contains("X-MBX-APIKEY", logging.AdditionalSensitiveParameterNames);
 
+        // 串流憑證是縱深防禦:目前沒有路徑會把它放進查詢字串,但萬一有,日誌裡也是遮蔽的。
+        // The stream credential is defence in depth: nothing puts it into a query string today, and should
+        // anything ever do so, the log still shows it masked.
+        Assert.Contains("listenKey", logging.AdditionalSensitiveParameterNames);
+
         // 重複呼叫不應該把名字疊上去。
         // Calling twice must not duplicate the names.
         var second = options.CreateLoggingOptions();
-        Assert.HasCount(2, second.AdditionalSensitiveParameterNames);
+        Assert.HasCount(BinanceConstants.SensitiveParameterNames.Count, second.AdditionalSensitiveParameterNames);
     }
 
     [TestMethod]

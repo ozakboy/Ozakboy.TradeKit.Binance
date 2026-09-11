@@ -175,4 +175,21 @@ internal readonly record struct BinanceUserDataEvent
     /// <returns>判讀結果。The outcome.</returns>
     public static BinanceUserDataEvent FromUnknown(DateTimeOffset eventTime) =>
         new(BinanceUserDataEventKind.Ignored, null, null, null, null, eventTime);
+
+    /// <summary>
+    /// 建立「這是控制指令的回應,不必交給訂閱者」的結果。
+    /// Creates an ignored outcome for a reply to a control command.
+    /// </summary>
+    /// <returns>判讀結果,<see cref="EventTime"/> 為預設值。The outcome, with a default <see cref="EventTime"/>.</returns>
+    /// <remarks>
+    /// 本套件在這條連線上送的唯一指令是心跳用的 <c>LIST_SUBSCRIPTIONS</c>,它的回應只有「連線還活著」
+    /// 這一個用途,而那個用途在連線層收到它的當下就已經達成了。回應沒有 <c>E</c>,所以事件時間留在預設值;
+    /// <see cref="BinanceUserDataEventKind.Ignored"/> 不會有人去讀它。
+    /// The only command this package sends on this connection is the <c>LIST_SUBSCRIPTIONS</c> heartbeat, and its
+    /// reply has a single purpose — proving the connection is alive — which the connection layer has already served
+    /// by the time the reply arrives. The reply has no <c>E</c>, so the event time stays at its default; nothing
+    /// reads it on an <see cref="BinanceUserDataEventKind.Ignored"/> outcome.
+    /// </remarks>
+    public static BinanceUserDataEvent FromCommandReply() =>
+        new(BinanceUserDataEventKind.Ignored, null, null, null, null, default);
 }

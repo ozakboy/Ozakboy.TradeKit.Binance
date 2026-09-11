@@ -9,6 +9,15 @@ namespace Ozakboy.TradeKit.Binance;
 /// </summary>
 /// <remarks>
 /// <para>
+/// 心跳間隔、閒置逾時與兩者的驗證規則刻意與 <see cref="BinanceMarketStreamOptions"/> 一致:
+/// 兩條串流用的是同一個心跳指令、同一套存活判定,規則一旦分岔,同一個設定值在兩邊就會有不同的意思。
+/// The heartbeat interval, the idle timeout, and their validation deliberately match
+/// <see cref="BinanceMarketStreamOptions"/>: both streams use the same heartbeat command and the same liveness
+/// test, and once the rules diverge the same value means different things on each side.
+/// </para>
+/// </remarks>
+/// <remarks>
+/// <para>
 /// 重連、退避與有界佇列背壓由 <c>Ozakboy.WebSockets</c> 負責,這裡只調整幣安這一側有意見的幾個值。
 /// 與行情串流分成兩份設定,是因為兩者的取捨方向相反:行情丟得起舊報價,帳戶事件一則都丟不起。
 /// Reconnection, backoff, and bounded-queue backpressure belong to <c>Ozakboy.WebSockets</c>; this type tunes
@@ -39,6 +48,19 @@ public sealed class BinanceUserDataStreamOptions
     public static readonly TimeSpan DefaultListenKeyKeepAliveInterval = TimeSpan.FromMinutes(30);
 
     /// <summary>
+    /// 心跳間隔的預設值,與行情串流相同。
+    /// The default heartbeat interval, the same as the market stream's.
+    /// </summary>
+    public static readonly TimeSpan DefaultKeepAliveInterval = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// 閒置逾時的預設值,取心跳間隔的三倍,容許連續漏掉兩次心跳才判定連線已死。
+    /// The default idle timeout, three times the heartbeat interval, so two heartbeats may be missed in a row
+    /// before the connection is declared dead.
+    /// </summary>
+    public static readonly TimeSpan DefaultIdleTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>
     /// 多久續期一次串流憑證。
     /// How often the stream credential is renewed.
     /// </summary>
@@ -51,38 +73,64 @@ public sealed class BinanceUserDataStreamOptions
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// 多久沒收到任何訊息就判定連線已死並重連。<see cref="TimeSpan.Zero"/> 表示不做這個判定,為預設值。
-    /// How long without a message before the connection is treated as dead and re-established;
-    /// <see cref="TimeSpan.Zero"/>, the default, disables the check.
+    /// 心跳間隔。設為 <see cref="TimeSpan.Zero"/> 表示不送心跳。
+    /// The heartbeat interval; <see cref="TimeSpan.Zero"/> disables it.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>預設關閉,而且這個預設值是有代價的,請讀完再決定。</b> 行情串流可以靠主動送
-    /// <c>LIST_SUBSCRIPTIONS</c> 把閒置計時撐住,所以它敢開存活偵測;使用者資料串流不行 ——
-    /// 一個沒有委託、沒有成交、沒有資金費結算的帳戶本來就可以安靜好幾個小時,那是<b>正常</b>的沉默。
-    /// 在這種串流上設一個逾時,等於每隔那麼久就無故重連一次,而每次重連都會送出一則
-    /// <see cref="ResyncReason.Reconnected"/>,逼上層做一次不必要的全量對帳。
-    /// <b>Off by default, and the default has a cost; read this before changing it.</b> The market stream can
-    /// hold its idle clock open by sending <c>LIST_SUBSCRIPTIONS</c>, which is why it dares to enable liveness
-    /// detection. The user data stream cannot: an account with no orders, no fills, and no funding settlement is
-    /// entitled to hours of silence, and that silence is <b>normal</b>. A timeout on this stream means an
-    /// unprompted reconnect that often, and every reconnect raises a
-    /// <see cref="ResyncReason.Reconnected"/> that forces an unnecessary full reconciliation upstairs.
+    /// 心跳送的是 <c>{"method":"LIST_SUBSCRIPTIONS","id":N}</c>,它一定會有回覆,而回覆會刷新閒置計時。
+    /// 帳戶本來就可以安靜好幾個小時,少了心跳,<see cref="IdleTimeout"/> 會把一條健康的連線判死,
+    /// 每隔那麼久就無故重連一次,並且每次都送出一則 <see cref="ResyncReason.Reconnected"/>
+    /// 逼上層做一次不必要的全量對帳。<b>關掉心跳而留著閒置逾時,正是這個組合。</b>
+    /// The heartbeat sends <c>{"method":"LIST_SUBSCRIPTIONS","id":N}</c>, which always draws a reply, and the reply
+    /// refreshes the idle clock. An account is entitled to hours of silence; without the heartbeat,
+    /// <see cref="IdleTimeout"/> condemns a healthy connection, reconnects that often for no reason, and raises a
+    /// <see cref="ResyncReason.Reconnected"/> each time that forces an unnecessary full reconciliation upstairs.
+    /// <b>Disabling the heartbeat while keeping the idle timeout is exactly that combination.</b>
     /// </para>
     /// <para>
-    /// 代價是另一邊:連線若「握手成功、狀態顯示已連線、資料流卻被中介設備吃掉」,關閉存活偵測就發現不了,
-    /// 而帳戶串流上發現不了代表成交照樣發生、本地卻完全不知道。已知的緩衝只有兩個 ——
-    /// 憑證每 30 分鐘續期一次會打到 REST(但它驗的是 REST 不是 WebSocket),
-    /// 以及憑證滿 60 分鐘後交易所會主動斷開。要更早發現,就把這個值設成大於帳戶正常沉默期的長度。
-    /// The cost sits on the other side: a connection whose handshake succeeded, whose state reads connected, and
-    /// whose data flow is being swallowed by something in the path goes unnoticed with the check off — and
-    /// unnoticed on this stream means fills happening that the local side never learns about. The only known
-    /// backstops are the 30-minute renewal, which exercises REST rather than the socket, and the exchange
-    /// dropping the connection once the credential reaches 60 minutes. To notice sooner, set this comfortably
-    /// above the account's normal quiet period.
+    /// 幣安對單一連線的進站訊息限制是每秒十則,這個心跳一分鐘兩次,離上限很遠。
+    /// Binance caps incoming messages at ten per second per connection; twice a minute is nowhere near it.
     /// </para>
     /// </remarks>
-    public TimeSpan IdleTimeout { get; set; } = TimeSpan.Zero;
+    public TimeSpan KeepAliveInterval { get; set; } = DefaultKeepAliveInterval;
+
+    /// <summary>
+    /// 多久沒收到任何訊息就判定連線已死並重連。
+    /// How long without any message before the connection is treated as dead and re-established.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>為什麼一定要有。</b> 連線若「握手成功、狀態顯示已連線、資料流卻被中介設備吃掉」,
+    /// 少了存活偵測就發現不了,而帳戶串流上發現不了代表成交照樣發生、本地卻完全不知道。
+    /// 沒有它的時候只有兩道很晚的緩衝:憑證每 30 分鐘續期一次(但驗的是 REST 不是 WebSocket),
+    /// 以及憑證滿 60 分鐘後交易所主動斷開。
+    /// <b>Why it has to exist.</b> A connection whose handshake succeeded, whose state reads connected, and whose
+    /// data flow is being swallowed by something in the path goes unnoticed without liveness detection — and
+    /// unnoticed on this stream means fills happening that the local side never learns about. Without it the only
+    /// backstops come late: the 30-minute renewal, which exercises REST rather than the socket, and the exchange
+    /// dropping the connection once the credential reaches 60 minutes.
+    /// </para>
+    /// <para>
+    /// <b>為什麼現在可以預設開啟。</b> 原本預設關閉,理由是「帳戶正常的沉默」與「死掉的連線」無從分辨。
+    /// 心跳解決了這一點:Testnet 實測,在 <c>/ws/{listenKey}</c> 上送 <c>LIST_SUBSCRIPTIONS</c>,
+    /// 56–111 ms 內就收到回覆,與行情串流的行為相同。所以這裡比照行情串流,心跳 30 秒、閒置逾時 90 秒。
+    /// <b>Why it can now default to on.</b> It used to default to off because an account's normal silence could
+    /// not be told apart from a dead connection. The heartbeat settles that: measured on the testnet, a
+    /// <c>LIST_SUBSCRIPTIONS</c> sent on <c>/ws/{listenKey}</c> is answered within 56–111 ms, just as on the market
+    /// stream. The defaults therefore follow the market stream: a 30-second heartbeat and a 90-second idle timeout.
+    /// </para>
+    /// <para>
+    /// <b>那則回覆帶著憑證。</b> 實測的回覆是 <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>,也就是每 30 秒
+    /// 一則帶著 listenKey 的訊息。解析器看到「有 <c>id</c>、沒有 <c>e</c>」就直接判為忽略,<c>result</c>
+    /// 不讀也不轉述,見 <c>BinanceUserDataReader</c>。
+    /// <b>That reply carries the credential.</b> The measured reply is
+    /// <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> — a frame holding the listenKey every 30 seconds. The reader
+    /// ignores anything with an <c>id</c> and no <c>e</c> outright, never reading or relaying <c>result</c>; see
+    /// <c>BinanceUserDataReader</c>.
+    /// </para>
+    /// </remarks>
+    public TimeSpan IdleTimeout { get; set; } = DefaultIdleTimeout;
 
     /// <summary>
     /// 重連次數上限,<see langword="null"/> 表示不限次數,為預設值。
@@ -162,10 +210,25 @@ public sealed class BinanceUserDataStreamOptions
             return BinanceErrors.InvalidOptions("握手逾時必須為正值。The connect timeout must be positive.");
         }
 
-        if (IdleTimeout < TimeSpan.Zero)
+        if (IdleTimeout <= TimeSpan.Zero)
         {
             return BinanceErrors.InvalidOptions(
-                "閒置逾時不可為負值;設為零表示不做存活偵測。The idle timeout must not be negative; zero disables liveness detection.");
+                "閒置逾時必須為正值,否則死掉的連線永遠不會被發現。The idle timeout must be positive; otherwise a dead connection is never noticed.");
+        }
+
+        if (KeepAliveInterval < TimeSpan.Zero)
+        {
+            return BinanceErrors.InvalidOptions("心跳間隔不可為負值。The keep-alive interval must not be negative.");
+        }
+
+        // 心跳比閒置逾時還慢等於沒有心跳:安靜的帳戶會在兩次心跳之間就被判死,然後無止境地重連,
+        // 每一次都附帶一則要求全量對帳的訊號。
+        // A heartbeat slower than the idle timeout is no heartbeat at all: a quiet account is condemned between
+        // two beats and reconnects for ever, each time with a signal demanding a full reconciliation.
+        if (KeepAliveInterval > TimeSpan.Zero && KeepAliveInterval >= IdleTimeout)
+        {
+            return BinanceErrors.InvalidOptions(
+                $"心跳間隔 {KeepAliveInterval} 必須短於閒置逾時 {IdleTimeout},否則安靜的帳戶會在兩次心跳之間被判定斷線並無止境重連。The keep-alive interval {KeepAliveInterval} must be shorter than the idle timeout {IdleTimeout}, or a quiet account is declared dead between beats and reconnects for ever.");
         }
 
         if (ConnectionQueueCapacity <= 0)
@@ -193,23 +256,40 @@ public sealed class BinanceUserDataStreamOptions
     /// Builds the connection-layer settings.
     /// </summary>
     /// <param name="uri">要連線的位址。The address to dial.</param>
+    /// <param name="keepAlivePayloadFactory">
+    /// 心跳訊息的產生器,每次送出時呼叫一次,以便換新的請求編號。
+    /// Produces the heartbeat message, called once per beat so that each carries a fresh request id.
+    /// </param>
     /// <returns>連線層的設定。The connection-layer settings.</returns>
     /// <remarks>
-    /// 刻意不設定應用層 ping。幣安沒有為 <c>/ws/{listenKey}</c> 定義過應用層的心跳訊息,
-    /// 而 <c>Ozakboy.WebSockets</c> 說得很清楚:對不認得這種訊息的對方送出未定義的內容,
-    /// 輕則被忽略,重則被視為協定違規而斷線 —— 在帳戶串流上斷線的代價是漏掉委託與成交。
-    /// No application-level ping is configured. Binance defines no such heartbeat for
-    /// <c>/ws/{listenKey}</c>, and <c>Ozakboy.WebSockets</c> is explicit about the risk: sending an undefined
-    /// payload to a peer that does not recognise it is ignored at best and treated as a protocol violation at
-    /// worst — and a disconnect on the account stream costs orders and fills.
+    /// 應用層 ping 用的是幣安<b>本來就有</b>的控制指令 <c>LIST_SUBSCRIPTIONS</c>,不是自創的訊息。
+    /// <c>Ozakboy.WebSockets</c> 警告過:對不認得的對方送未定義的內容,重則被當成協定違規而斷線;
+    /// 這條限制因此不適用 —— <c>/ws/{listenKey}</c> 認得這個指令,Testnet 實測每一次都有回覆,
+    /// 也沒有因此斷線。心跳間隔為零時不設定 ping,連產生器都不交出去。
+    /// The application-level ping is <c>LIST_SUBSCRIPTIONS</c>, a control command Binance <b>already defines</b>,
+    /// not an invented payload. <c>Ozakboy.WebSockets</c> warns that sending undefined content to a peer that does
+    /// not recognise it can be treated as a protocol violation; that caveat does not apply here, because
+    /// <c>/ws/{listenKey}</c> recognises the command — measured on the testnet, every one was answered and none
+    /// caused a disconnect. With a zero interval no ping is configured and the factory is not handed over at all.
     /// </remarks>
-    internal WebSocketClientOptions CreateWebSocketOptions(Uri uri) => new()
+    internal WebSocketClientOptions CreateWebSocketOptions(Uri uri, Func<string> keepAlivePayloadFactory)
     {
-        Uri = uri,
-        IdleTimeout = IdleTimeout,
-        ConnectTimeout = ConnectTimeout,
-        MaxReconnectAttempts = MaxReconnectAttempts,
-        QueueCapacity = ConnectionQueueCapacity,
-        BackpressureStrategy = BackpressureStrategy,
-    };
+        var options = new WebSocketClientOptions
+        {
+            Uri = uri,
+            IdleTimeout = IdleTimeout,
+            ConnectTimeout = ConnectTimeout,
+            MaxReconnectAttempts = MaxReconnectAttempts,
+            QueueCapacity = ConnectionQueueCapacity,
+            BackpressureStrategy = BackpressureStrategy,
+        };
+
+        if (KeepAliveInterval > TimeSpan.Zero)
+        {
+            options.ApplicationPingInterval = KeepAliveInterval;
+            options.ApplicationPingPayloadFactory = keepAlivePayloadFactory;
+        }
+
+        return options;
+    }
 }

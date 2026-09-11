@@ -64,11 +64,25 @@ namespace Ozakboy.TradeKit.Binance;
 /// <b>串流憑證是祕密。</b> listenKey 能連上這個帳戶的私有資料,因此它不會出現在任何錯誤訊息、
 /// <see cref="Error.Data"/>、例外訊息或串流識別字裡。診斷資料用的是固定字面值
 /// <c>userDataStream</c>,不是位址;連 <c>listenKeyExpired</c> 事件的原文都不會被轉述,
-/// 因為那則訊息本體就帶著憑證。
+/// 因為那則訊息本體就帶著憑證。心跳回覆也一樣:<c>LIST_SUBSCRIPTIONS</c> 的回覆就是
+/// <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>,解析器認出它之後連讀都不讀。
 /// <b>The stream credential is a secret.</b> A listenKey reaches this account's private data, so it appears in
 /// no error message, no <see cref="Error.Data"/>, no exception text, and no stream identifier. Diagnostics use
 /// the fixed literal <c>userDataStream</c> rather than the address, and not even the text of a
-/// <c>listenKeyExpired</c> frame is relayed, because that frame carries the credential itself.
+/// <c>listenKeyExpired</c> frame is relayed, because that frame carries the credential itself. The same goes for
+/// heartbeat replies: the answer to <c>LIST_SUBSCRIPTIONS</c> is <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>,
+/// and once the reader recognises one it does not so much as look inside.
+/// </para>
+/// <para>
+/// <b>存活偵測靠心跳。</b> 帳戶可以合理地安靜好幾個小時,所以單靠「多久沒收到訊息」會把健康的連線判死。
+/// 這裡比照行情串流定時送 <c>LIST_SUBSCRIPTIONS</c>,回覆會刷新閒置計時;真正死掉的連線在
+/// <see cref="BinanceUserDataStreamOptions.IdleTimeout"/> 之內被中止,走與一般斷線相同的重連路徑,
+/// 回來之後送出 <see cref="ResyncReason.Reconnected"/>。
+/// <b>Liveness relies on a heartbeat.</b> An account can reasonably stay silent for hours, so "how long since the
+/// last message" alone would condemn a healthy connection. As on the market stream, a <c>LIST_SUBSCRIPTIONS</c> is
+/// sent on a timer and its reply refreshes the idle clock; a genuinely dead connection is aborted within
+/// <see cref="BinanceUserDataStreamOptions.IdleTimeout"/>, takes the same reconnect path as any other drop, and
+/// raises <see cref="ResyncReason.Reconnected"/> once it is back.
 /// </para>
 /// </remarks>
 public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
@@ -93,6 +107,7 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     private bool _credentialCreated;
     private int _disposed;
     private Error? _stopReason;
+    private long _requestId;
 
     /// <summary>
     /// 建立使用者資料來源。
@@ -464,7 +479,7 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
         // authority, and every error this layer produces goes through BinanceUserDataErrors, which never
         // carries the address.
         var uri = BinanceStreamNames.RawStreamUri(_endpoints.WebSocketBaseUri, listenKey);
-        var options = _streamOptions.CreateWebSocketOptions(uri);
+        var options = _streamOptions.CreateWebSocketOptions(uri, NextKeepAlivePayload);
         var validation = options.Validate();
 
         if (validation.IsFailure)
@@ -766,6 +781,23 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
             // The cancellation comes from DisposeAsync and is a normal shutdown.
         }
     }
+
+    /// <summary>
+    /// 產生下一則心跳訊息。
+    /// Produces the next heartbeat message.
+    /// </summary>
+    /// <returns><c>LIST_SUBSCRIPTIONS</c> 控制指令。The <c>LIST_SUBSCRIPTIONS</c> control command.</returns>
+    /// <remarks>
+    /// 指令格式與請求編號遞增的做法沿用行情串流的 <see cref="BinanceStreamCommands"/>,不另寫一份。
+    /// 編號只是讓每一則心跳彼此可區分;回覆不做比對 —— 回覆的本體就是憑證,
+    /// 解析器看到就忽略,見 <see cref="BinanceUserDataReader"/>。
+    /// The command format and the incrementing request id are shared with the market stream through
+    /// <see cref="BinanceStreamCommands"/> rather than duplicated. The id only keeps the beats distinguishable; the
+    /// replies are never matched up, because their body is the credential and the reader ignores them on sight —
+    /// see <see cref="BinanceUserDataReader"/>.
+    /// </remarks>
+    private string NextKeepAlivePayload() =>
+        BinanceStreamCommands.ListSubscriptions(Interlocked.Increment(ref _requestId));
 
     private string ReconnectedDetail(DateTimeOffset untrustedSince)
     {

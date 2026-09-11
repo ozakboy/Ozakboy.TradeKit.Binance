@@ -89,13 +89,17 @@ public sealed record BinanceEndpoints
     /// The WebSocket base address such as <c>wss://fstream.binance.com</c>, with no path.
     /// </summary>
     /// <remarks>
-    /// 本階段不使用 WebSocket,這個欄位先納入端點組合,是為了讓行情訂閱上線時不必新增第二套環境設定
-    /// —— 一旦分成兩處設定,錯接就又變成可能。串流路徑(<c>/ws/…</c> 與 <c>/stream?streams=…</c>)
-    /// 由實作串流的那一階段決定,這裡只提供主機。
-    /// This release does not use WebSockets. The field is part of the set from the start so that adding market
-    /// streams later needs no second environment setting: the moment there are two places to configure, a
-    /// mismatch becomes possible again. The stream paths are for the streaming stage to decide; only the host
-    /// is fixed here.
+    /// 行情串流(<see cref="BinanceMarketDataFeed"/>,走 <c>/stream</c>)與使用者資料串流
+    /// (<see cref="BinanceUserDataFeed"/>,走 <c>/ws/{listenKey}</c>)都從這個位址撥號。它與 REST 位址放在
+    /// 同一組端點裡,是為了讓兩種連線永遠指向同一個環境 —— 一旦分成兩處設定,「下單打 Testnet、
+    /// 帳戶事件卻從主網來」這種錯接就又變成可能。這裡只提供主機,路徑由各串流自己決定,
+    /// 見 <see cref="MarketData.BinanceStreamNames"/>。
+    /// Both the market streams (<see cref="BinanceMarketDataFeed"/>, on <c>/stream</c>) and the user data stream
+    /// (<see cref="BinanceUserDataFeed"/>, on <c>/ws/{listenKey}</c>) dial this address. It sits in the same set as
+    /// the REST address so that both kinds of connection always point at one environment: the moment there are two
+    /// places to configure, a mismatch such as orders on Testnet with account events from production becomes
+    /// possible again. Only the host is fixed here; each stream decides its own path — see
+    /// <see cref="MarketData.BinanceStreamNames"/>.
     /// </remarks>
     public Uri WebSocketBaseUri { get; }
 

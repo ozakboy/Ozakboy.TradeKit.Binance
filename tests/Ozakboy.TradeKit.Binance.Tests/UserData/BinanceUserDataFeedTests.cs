@@ -364,6 +364,192 @@ public sealed class BinanceUserDataFeedTests
         }
     }
 
+    // ── 心跳與存活偵測 / Heartbeat and liveness ───────────────────────
+
+    [TestMethod]
+    public async Task AHeartbeatReplyIsIgnoredWithoutRaisingAnyError()
+    {
+        // 心跳每 30 秒一則。回覆若被當成讀不懂的訊息,消費端每 30 秒就收到一筆假警報,
+        // 真正的失敗會被淹掉 —— 而且那筆「失敗」的來源是一則帶著憑證的訊息。
+        // A heartbeat goes out every 30 seconds. Treating its reply as unreadable hands the consumer a false
+        // alarm that often and buries the real failures — and each of those "failures" would stem from a frame
+        // carrying the credential.
+        var connection = new FakeWebSocketConnection([
+            UserDataSamples.HeartbeatReply(UserDataSamples.ListenKey, 1),
+            UserDataSamples.HeartbeatRejection(UserDataSamples.ListenKey),
+            UserDataSamples.HeartbeatReply(UserDataSamples.ListenKey, 2),
+            UserDataSamples.OrderNew,
+        ]);
+
+        var (feed, _, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
+
+        using (http)
+        {
+            await using (feed)
+            {
+                // 對帳訊號這一條預期什麼都收不到,所以它的 MoveNextAsync 會一直懸著。非同步迭代器不允許在
+                // MoveNextAsync 懸著的時候 DisposeAsync(會擲 NotSupportedException),因此用它自己的權杖
+                // 取消,等那一次移動結束之後才釋放。
+                // The resync subscription is expected to receive nothing, so its MoveNextAsync stays pending. An
+                // async iterator refuses DisposeAsync while a MoveNextAsync is pending (NotSupportedException), so
+                // it is cancelled through its own token and disposed only once that move has finished.
+                using var signalsCts = new CancellationTokenSource();
+
+                var orders = feed.SubscribeOrderUpdatesAsync().GetAsyncEnumerator();
+                var signals = feed.SubscribeResyncSignalsAsync(signalsCts.Token).GetAsyncEnumerator();
+
+                var orderMove = orders.MoveNextAsync();
+                var signalMove = signals.MoveNextAsync();
+
+                try
+                {
+                    // 第一個交到手上的就是那筆委託 —— 前面三則回覆沒有在任何一條串流上留下東西。
+                    // The first thing delivered is the order: the three replies ahead of it left nothing behind.
+                    Assert.IsTrue(await orderMove.AsTask().WaitAsync(UserDataFixture.Timeout));
+                    Assert.IsTrue(orders.Current.IsSuccess, orders.Current.Error?.Message);
+                    Assert.AreEqual("pulsetrade-uds-1", orders.Current.GetValueOrThrow().ClientOrderId);
+
+                    Assert.IsFalse(signalMove.IsCompleted, "心跳回覆不該在對帳訊號串流上產生任何東西。");
+                }
+                finally
+                {
+                    await signalsCts.CancelAsync();
+                    _ = await signalMove.AsTask().WaitAsync(UserDataFixture.Timeout);
+
+                    await orders.DisposeAsync();
+                    await signals.DisposeAsync();
+                }
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task TheHeartbeatIsAListSubscriptionsCommandWithAnIncreasingId()
+    {
+        var connection = new FakeWebSocketConnection([UserDataSamples.OrderNew]);
+
+        var (feed, _, http) = UserDataFixture.Create(
+            new FakeWebSocketConnectionFactory(connection),
+            new BinanceUserDataStreamOptions
+            {
+                KeepAliveInterval = TimeSpan.FromMilliseconds(50),
+                IdleTimeout = TimeSpan.FromSeconds(10),
+            });
+
+        using (http)
+        {
+            await using (feed)
+            {
+                _ = await UserDataFixture.TakeAsync(feed.SubscribeOrderUpdatesAsync(), 1);
+
+                await UserDataFixture.WaitUntilAsync(
+                    () => connection.Sent.Count >= 2,
+                    "心跳計時器應該在連線上送出 LIST_SUBSCRIPTIONS。");
+
+                var sent = connection.Sent;
+
+                Assert.AreEqual("""{"method":"LIST_SUBSCRIPTIONS","id":1}""", sent[0]);
+                Assert.AreEqual("""{"method":"LIST_SUBSCRIPTIONS","id":2}""", sent[1]);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task AnIdleConnectionIsAbortedAndTheReconnectRaisesAResyncSignal()
+    {
+        // 「握手成功、狀態顯示已連線、資料流卻被吃掉」的連線,只有閒置逾時抓得到。抓到之後要走的是一般斷線
+        // 的重連路徑:同一把憑證、重新撥號、回來之後送 Reconnected —— 那段期間的成交交易所不補送。
+        // A connection that shook hands, reads connected, and has its data swallowed is only caught by the idle
+        // timeout. Once caught it takes the ordinary reconnect path — same credential, redial, Reconnected once
+        // back — because nothing from the gap is replayed.
+        var clock = TestClock.AtFixedInstant();
+        var options = TestPipeline.CreateOptions(BinanceEnvironment.Testnet);
+        var stub = UserDataFixture.ListenKeyStub(UserDataSamples.ListenKey);
+        var (pipeline, http) = TestPipeline.Create(options, stub, clock);
+
+        // 第一條連線送完一則之後就再也不說話,也不會自己關 —— 心跳送得出去,但永遠等不到回覆。
+        // 唯一能讓它重連的,就是閒置逾時。
+        // The first connection delivers one frame and then never speaks again, nor closes by itself: heartbeats
+        // go out and are never answered. The idle timeout is the only thing that can make it reconnect.
+        var first = new FakeWebSocketConnection([UserDataSamples.OrderNew]);
+        var second = new FakeWebSocketConnection([UserDataSamples.OrderPartiallyFilled]);
+        var factory = new FakeWebSocketConnectionFactory(first, second);
+
+        var feed = new BinanceUserDataFeed(
+            pipeline,
+            options,
+            new BinanceUserDataStreamOptions
+            {
+                KeepAliveInterval = TimeSpan.FromMilliseconds(50),
+                IdleTimeout = TimeSpan.FromMilliseconds(200),
+            },
+            loggerFactory: null,
+            timeProvider: clock,
+            connectionFactory: factory);
+
+        using (http)
+        {
+            await using (feed)
+            {
+                var orders = feed.SubscribeOrderUpdatesAsync().GetAsyncEnumerator();
+                var signals = feed.SubscribeResyncSignalsAsync().GetAsyncEnumerator();
+
+                var orderMove = orders.MoveNextAsync();
+                var signalMove = signals.MoveNextAsync();
+
+                try
+                {
+                    Assert.IsTrue(await orderMove.AsTask().WaitAsync(UserDataFixture.Timeout));
+                    Assert.AreEqual(OrderStatus.New, orders.Current.GetValueOrThrow().Status);
+                    Assert.HasCount(1, factory.Created);
+
+                    // 連線層用注入的時鐘量「多久沒收到訊息」。讓時鐘越過閒置逾時,下一次檢查就會判定這條連線已死。
+                    // The connection layer measures silence with the injected clock. Moving it past the idle
+                    // timeout makes the next check declare the connection dead.
+                    clock.Advance(TimeSpan.FromSeconds(1));
+
+                    // 先是斷線(暫時性失敗),再是「回來了、請對帳」。
+                    // First the drop, as a transient failure; then "it is back, go reconcile".
+                    Assert.IsTrue(await signalMove.AsTask().WaitAsync(UserDataFixture.Timeout));
+                    Assert.IsTrue(signals.Current.IsFailure, "閒置逾時的斷線應該先以一筆失敗出現。");
+                    Assert.IsTrue(signals.Current.Error!.IsTransient, "閒置逾時會重連,這筆失敗必須是暫時性的。");
+
+                    Assert.IsTrue(await signals.MoveNextAsync().AsTask().WaitAsync(UserDataFixture.Timeout));
+
+                    var signal = signals.Current.GetValueOrThrow();
+
+                    Assert.AreEqual(ResyncReason.Reconnected, signal.Reason);
+                    Assert.AreNotEqual(default, signal.UntrustedSince);
+
+                    // 重連之後的事件照常送達,而且用的是同一把憑證 —— 閒置逾時不是憑證過期,不該重建憑證。
+                    // Events flow again after the reconnect, on the same credential: an idle timeout is not an
+                    // expiry and must not rebuild the credential.
+                    Assert.IsTrue(await orders.MoveNextAsync().AsTask().WaitAsync(UserDataFixture.Timeout));
+
+                    var afterReconnect = orders.Current;
+
+                    if (afterReconnect.IsFailure)
+                    {
+                        // 斷線那一筆也會出現在委託串流上,排在重連後的事件前面。
+                        // The drop also appears on the order stream, ahead of the events after the reconnect.
+                        Assert.IsTrue(afterReconnect.Error!.IsTransient);
+                        Assert.IsTrue(await orders.MoveNextAsync().AsTask().WaitAsync(UserDataFixture.Timeout));
+                        afterReconnect = orders.Current;
+                    }
+
+                    Assert.AreEqual(OrderStatus.PartiallyFilled, afterReconnect.GetValueOrThrow().Status);
+                    Assert.IsGreaterThanOrEqualTo(2, factory.Created.Count);
+                    Assert.AreEqual(1, stub.Requests.Count(request => request.Method == HttpMethod.Post));
+                }
+                finally
+                {
+                    await orders.DisposeAsync();
+                    await signals.DisposeAsync();
+                }
+            }
+        }
+    }
+
     [TestMethod]
     public async Task TheStreamIdentifierInDiagnosticsIsAFixedLiteralRatherThanTheCredential()
     {

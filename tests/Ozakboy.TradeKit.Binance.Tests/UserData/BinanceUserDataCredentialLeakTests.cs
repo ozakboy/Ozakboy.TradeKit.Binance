@@ -28,6 +28,15 @@ namespace Ozakboy.TradeKit.Binance.Tests.UserData;
 /// <see cref="UserDataSamples.ListenKeyExpiredWithoutEventTime"/>, carries the credential — turns this test
 /// red; reverting turns it green. A security test that has never failed is indistinguishable from no test.
 /// </para>
+/// <para>
+/// 加入心跳回覆之後又弄壞驗證了一次:把 <c>BinanceUserDataReader</c> 認出指令回覆的那一支,改成判失敗並把
+/// <c>root.GetRawText()</c> 接進錯誤訊息。這條測試立刻變紅,收集到的文字裡 <c>id</c> 為 1、7、42 的三則心跳回覆
+/// 與 <c>id</c> 為 9 的被拒回覆,每一則都把 canary 帶進了 <see cref="Error.Message"/>;改回來之後恢復綠燈。
+/// It was broken on purpose once more after heartbeat replies were added: the branch of
+/// <c>BinanceUserDataReader</c> that recognises command replies was changed to fail with <c>root.GetRawText()</c>
+/// in the message. This test went red at once, with the canary carried into <see cref="Error.Message"/> by every
+/// heartbeat reply — ids 1, 7, and 42 — and by the rejection with id 9; reverting restored green.
+/// </para>
 /// </remarks>
 [TestClass]
 public sealed class BinanceUserDataCredentialLeakTests
@@ -46,11 +55,20 @@ public sealed class BinanceUserDataCredentialLeakTests
         // A script that produces every kind of failure: an unreadable frame, a binary frame, an order with an
         // unmappable status, a credential-expired frame missing a field — whose raw text carries the
         // credential — and finally a drop and a reconnect.
+        //
+        // 心跳回覆也在劇本裡:Testnet 實測,LIST_SUBSCRIPTIONS 的回覆就是 {"result":["<listenKey>"],"id":N},
+        // 預設設定下每 30 秒一則。它是這條串流上出現頻率最高的「帶憑證的訊息」,比 listenKeyExpired 高得多。
+        // Heartbeat replies are in the script too. Measured on the testnet, the answer to LIST_SUBSCRIPTIONS is
+        // {"result":["<listenKey>"],"id":N}, one every 30 seconds by default — by far the most frequent
+        // credential-bearing frame on this stream, much more common than listenKeyExpired.
         var first = new FakeWebSocketConnection(
             [
+                UserDataSamples.HeartbeatReply(Canary, 1),
                 "}{ not json",
                 FakeWebSocketFrame.Binary(UserDataSamples.OrderNew),
+                UserDataSamples.HeartbeatReply(Canary, 42),
                 UserDataSamples.OrderUnknownStatus,
+                UserDataSamples.HeartbeatRejection(Canary),
                 UserDataSamples.ListenKeyExpiredWithoutEventTime(Canary),
                 UserDataSamples.OrderNew,
             ],
@@ -59,20 +77,26 @@ public sealed class BinanceUserDataCredentialLeakTests
         // 重連之後才送出真正的憑證失效事件,逼出重建憑證那一段。
         // The real credential-expired event comes after the reconnect, which forces the rebuild path.
         var second = new FakeWebSocketConnection([
+            UserDataSamples.HeartbeatReply(Canary, 7),
             UserDataSamples.AccountUpdate,
             UserDataSamples.ListenKeyExpired(Canary),
         ]);
 
         var third = new FakeWebSocketConnection([UserDataSamples.MarginCall]);
+        var factory = new FakeWebSocketConnectionFactory(first, second, third);
 
         var (feed, stub, http) = UserDataFixture.Create(
-            new FakeWebSocketConnectionFactory(first, second, third),
+            factory,
             new BinanceUserDataStreamOptions
             {
                 // 續期也要跑到,而且讓它失敗 —— 失敗的回應會經過錯誤對映,那是另一條可能外流的路。
                 // The renewal has to run and to fail: a failed response goes through the error mapping, which
                 // is another route by which the credential could escape.
                 ListenKeyKeepAliveInterval = TimeSpan.FromMilliseconds(50),
+
+                // 心跳也要真的送出去 —— 送出的內容一樣算進「這條串流產生的文字」。
+                // Heartbeats have to go out for real as well: what is sent counts as text this stream produced.
+                KeepAliveInterval = TimeSpan.FromMilliseconds(50),
             },
             Canary,
             keepAliveResponder: static () =>
@@ -98,8 +122,9 @@ public sealed class BinanceUserDataCredentialLeakTests
             // renewal.
             await UserDataFixture.WaitUntilAsync(
                 () => stub.Requests.Count(request => request.Method == HttpMethod.Post) >= 2
-                    && stub.Requests.Any(request => request.Method == HttpMethod.Put),
-                "劇本沒有跑到重建憑證與續期,這條測試就沒有驗到那兩段路。");
+                    && stub.Requests.Any(request => request.Method == HttpMethod.Put)
+                    && factory.Created.Any(connection => connection.Sent.Count > 0),
+                "劇本沒有跑到重建憑證、續期與心跳,這條測試就沒有驗到那幾段路。");
 
             await feed.DisposeAsync();
             await cts.CancelAsync();
@@ -115,6 +140,17 @@ public sealed class BinanceUserDataCredentialLeakTests
             foreach (var request in stub.Requests)
             {
                 texts.Add(request.RequestUri?.ToString() ?? string.Empty);
+            }
+
+            // WebSocket 上送出去的也算:心跳訊息若把回覆裡的東西帶回去,那同樣是一條外流的路。
+            // What goes out over the WebSocket counts too: a heartbeat echoing anything from a reply would be
+            // another route out.
+            foreach (var connection in factory.Created)
+            {
+                foreach (var sent in connection.Sent)
+                {
+                    texts.Add(sent);
+                }
             }
         }
 

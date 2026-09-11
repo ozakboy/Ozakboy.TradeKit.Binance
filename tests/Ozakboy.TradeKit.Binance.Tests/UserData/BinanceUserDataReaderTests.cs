@@ -151,6 +151,94 @@ public sealed class BinanceUserDataReaderTests
     }
 
     [TestMethod]
+    public void AnAccountUpdateMapsTheOptionalBalanceAndPositionFields()
+    {
+        var update = BinanceUserDataReader.Read(UserDataSamples.AccountUpdate).GetValueOrThrow().Account!;
+
+        var balance = update.Balances[0];
+
+        Assert.AreEqual(15000.12345678m, balance.CrossWalletBalance);
+        Assert.AreEqual(0m, balance.NonTradingChange, "bc 是 \"0\" 時是零,不是 null —— 交易所明確說了沒有非交易變動。");
+
+        var position = update.Positions[0];
+
+        Assert.AreEqual(PositionSide.Both, position.Side);
+        Assert.AreEqual(0m, position.AccumulatedRealizedPnl);
+
+        // 全倉部位的 iw 一律是 "0"。照抄會得到一個「逐倉保證金為零」的全倉部位。
+        // A cross position's iw is always "0"; copying it gives a cross position an isolated margin of zero.
+        Assert.IsNull(position.IsolatedMargin, "全倉部位的逐倉保證金應為 null。");
+    }
+
+    [TestMethod]
+    public void AnIsolatedPositionCarriesItsIsolatedMarginAndRealizedPnl()
+    {
+        var update = BinanceUserDataReader.Read(UserDataSamples.AccountUpdateIsolated).GetValueOrThrow().Account!;
+
+        var position = update.Positions[0];
+
+        Assert.AreEqual("ETHUSDT", position.Symbol);
+        Assert.AreEqual(-0.500m, position.Quantity);
+        Assert.AreEqual(PositionSide.Short, position.Side);
+        Assert.AreEqual(2500.00m, position.EntryPrice);
+        Assert.AreEqual(1.20000000m, position.UnrealizedPnl);
+        Assert.AreEqual(-3.25000000m, position.AccumulatedRealizedPnl);
+        Assert.AreEqual(MarginMode.Isolated, position.MarginMode);
+        Assert.AreEqual(125.40000000m, position.IsolatedMargin);
+        Assert.AreEqual(14864.60000000m, update.Balances[0].CrossWalletBalance);
+    }
+
+    [TestMethod]
+    public void OptionalAccountFieldsThatAreAbsentAreNullRatherThanZero()
+    {
+        // 零是一個說得出口的數字,「交易所沒說」不是。bc 缺席時填零,會讓一筆入金被當成策略賺的。
+        // Zero is a number one can state and "the exchange did not say" is not. Defaulting bc to zero counts a
+        // deposit as something the strategy earned.
+        var update = BinanceUserDataReader
+            .Read(UserDataSamples.AccountUpdateWithoutOptionalFields)
+            .GetValueOrThrow()
+            .Account!;
+
+        Assert.IsNull(update.Balances[0].CrossWalletBalance, "cw 缺席應為 null。");
+        Assert.IsNull(update.Balances[0].NonTradingChange, "bc 缺席應為 null。");
+        Assert.IsNull(update.Positions[0].AccumulatedRealizedPnl, "cr 缺席應為 null。");
+        Assert.IsNull(update.Positions[0].IsolatedMargin, "逐倉部位的 iw 缺席應為 null。");
+        Assert.AreEqual(MarginMode.Isolated, update.Positions[0].MarginMode);
+    }
+
+    [TestMethod]
+    public void AnAccountPositionWithoutAnEntryPriceFailsInsteadOfDefaultingToZero()
+    {
+        // PositionChange.EntryPrice 的零是留給「已平倉」的。缺了就填零,一個還開著的部位會看起來像沒有進場價。
+        // Zero is reserved for a closed position; defaulting a missing entry price gives an open position none.
+        var read = BinanceUserDataReader.Read(UserDataSamples.AccountUpdateWithoutEntryPrice);
+
+        Assert.IsTrue(read.IsFailure);
+        Assert.IsTrue(read.Error!.TryGetData(BinanceErrorDataKeys.Field, out var field));
+        Assert.AreEqual("ep", field);
+    }
+
+    [TestMethod]
+    [DataRow(nameof(UserDataSamples.AccountUpdateWithoutMarginType), "BTCUSDT")]
+    [DataRow(nameof(UserDataSamples.MarginCallWithoutMarginType), "ETHUSDT")]
+    public void AMissingMarginTypeFailsInsteadOfDefaultingToIsolated(string sampleName, string expectedSymbol)
+    {
+        // 缺席曾經會落到「不是 cross 就是逐倉」:全倉部位被讀成逐倉,保證金與強平的計算整個走錯邊,
+        // 而欄位看起來完全正常。REST 持倉查詢缺這個欄位本來就判失敗,兩邊要一致。
+        // An absent value used to fall through to isolated, sending a cross position's margin and liquidation
+        // maths down the wrong branch while looking normal. The REST reader already fails here; so must this.
+        var sample = (string)typeof(UserDataSamples).GetField(sampleName)!.GetValue(null)!;
+
+        var read = BinanceUserDataReader.Read(sample);
+
+        Assert.IsTrue(read.IsFailure, "缺少保證金模式卻解析成功 —— 那個值是猜出來的。");
+        Assert.IsTrue(read.Error!.TryGetData(BinanceErrorDataKeys.Field, out var field));
+        Assert.AreEqual("mt", field);
+        Assert.IsTrue(read.Error!.TryGetData(BinanceErrorDataKeys.Symbol, out var symbol));
+        Assert.AreEqual(expectedSymbol, symbol);
+    }
+
+    [TestMethod]
     public void AnAccountUpdateThatOnlyMovedTheBalanceListsNoPositions()
     {
         // 增量只含有變動的項目。把它當快照用,會讓這一則看起來像「所有部位都被平掉了」。
@@ -208,6 +296,107 @@ public sealed class BinanceUserDataReaderTests
         var call = BinanceUserDataReader.Read(UserDataSamples.MarginCall).GetValueOrThrow().MarginWarning!;
 
         Assert.AreEqual(MarginMode.Cross, call.Positions[0].MarginMode);
+    }
+
+    [TestMethod]
+    public void AMarginCallCarriesTheMaintenanceMarginAndARealNotional()
+    {
+        // 標記價是真的,所以名目價值也是真的 —— 這正是追繳部位與帳戶增量部位的差別。
+        // The mark price is real, so the notional is too — which is exactly how a margin call position differs
+        // from an account delta position.
+        var position = BinanceUserDataReader
+            .Read(UserDataSamples.MarginCall)
+            .GetValueOrThrow()
+            .MarginWarning!
+            .Positions[0];
+
+        Assert.AreEqual(1.614445m, position.MaintenanceMargin);
+        Assert.AreEqual(1.327m * 7.10m, position.Notional);
+        Assert.IsNull(position.IsolatedMargin, "全倉部位的逐倉保證金應為 null。");
+    }
+
+    [TestMethod]
+    public void AMarginCallWithoutAMarkPriceFails()
+    {
+        // 少了標記價,這則警告就沒有意義,名目價值也會跟著變成零。
+        // Without the mark price the warning means nothing, and the notional collapses to zero with it.
+        var read = BinanceUserDataReader.Read(UserDataSamples.MarginCallWithoutMarkPrice);
+
+        Assert.IsTrue(read.IsFailure);
+        Assert.AreEqual(BinanceErrorCodes.MalformedResponse, read.Error?.Code);
+        Assert.IsTrue(read.Error!.TryGetData(BinanceErrorDataKeys.Field, out var field));
+        Assert.AreEqual("mp", field);
+        Assert.IsTrue(read.Error!.TryGetData(BinanceErrorDataKeys.Symbol, out var symbol));
+        Assert.AreEqual("ETHUSDT", symbol);
+    }
+
+    [TestMethod]
+    public void AMarginCallWithoutOptionalFieldsLeavesThemNull()
+    {
+        var call = BinanceUserDataReader
+            .Read(UserDataSamples.MarginCallIsolatedWithoutMaintenanceMargin)
+            .GetValueOrThrow()
+            .MarginWarning!;
+
+        Assert.IsNull(call.CrossWalletBalance, "cw 缺席應為 null。");
+
+        var position = call.Positions[0];
+
+        Assert.IsNull(position.MaintenanceMargin, "mm 缺席應為 null。");
+        Assert.AreEqual(MarginMode.Isolated, position.MarginMode);
+        Assert.AreEqual(12.50m, position.IsolatedMargin);
+        Assert.AreEqual(PositionSide.Short, position.Side);
+        Assert.AreEqual(2600.00m, position.MarkPrice);
+    }
+
+    // ── 心跳回覆 / Heartbeat replies ───────────────────────────────────
+
+    [TestMethod]
+    public void AHeartbeatReplyIsIgnored()
+    {
+        // 回覆的 result 裡就是憑證。判成失敗等於每 30 秒送一則錯誤給消費端,而錯誤會進日誌。
+        // The reply's result is the credential. Failing it would hand the consumer an error every 30 seconds,
+        // and errors end up in logs.
+        var read = BinanceUserDataReader.Read(UserDataSamples.HeartbeatReply(UserDataSamples.ListenKey, 1));
+
+        Assert.IsTrue(read.IsSuccess, read.Error?.Message);
+        Assert.AreEqual(BinanceUserDataEventKind.Ignored, read.GetValueOrThrow().Kind);
+    }
+
+    [TestMethod]
+    public void ARejectedOrEmptyCommandReplyIsIgnoredToo()
+    {
+        foreach (var reply in new[]
+                 {
+                     UserDataSamples.HeartbeatRejection(UserDataSamples.ListenKey),
+                     """{"result":null,"id":7}""",
+                 })
+        {
+            var read = BinanceUserDataReader.Read(reply);
+
+            Assert.IsTrue(read.IsSuccess, read.Error?.Message);
+            Assert.AreEqual(BinanceUserDataEventKind.Ignored, read.GetValueOrThrow().Kind);
+        }
+    }
+
+    [TestMethod]
+    public void AnObjectWithNeitherAnIdNorAnEventTypeStillFailsWithoutQuotingIt()
+    {
+        // 既不是事件也不是回覆,是協定變了 —— 要浮上來。但失敗只說缺哪個欄位,不說收到了什麼。
+        // Neither an event nor a reply means the protocol changed, so it must surface — naming the missing field
+        // and never what arrived.
+        var read = BinanceUserDataReader.Read($$"""{"result":["{{UserDataSamples.ListenKey}}"]}""");
+
+        Assert.IsTrue(read.IsFailure);
+        Assert.IsTrue(read.Error!.TryGetData(BinanceErrorDataKeys.Field, out var field));
+        Assert.AreEqual("e", field);
+
+        var described = string.Join(
+            '|',
+            new[] { read.Error.Code, read.Error.Message }
+                .Concat(read.Error.Data?.Select(pair => $"{pair.Key}={pair.Value}") ?? []));
+
+        Assert.DoesNotContain(UserDataSamples.ListenKey, described, StringComparison.OrdinalIgnoreCase);
     }
 
     // ── 憑證與未知事件 / Credential and unknown events ─────────────────

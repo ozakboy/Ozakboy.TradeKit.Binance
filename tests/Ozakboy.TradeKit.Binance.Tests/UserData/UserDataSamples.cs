@@ -71,9 +71,68 @@ internal static class UserDataSamples
     public const string AccountUpdateUnknownReason =
         """{"e":"ACCOUNT_UPDATE","T":1789117391000,"E":1789117391002,"a":{"m":"A_REASON_ADDED_LATER","B":[{"a":"USDT","wb":"14999.00000000","cw":"14999.00000000","bc":"0"}],"P":[]}}""";
 
+    /// <summary>
+    /// 逐倉空單的帳戶增量:帶逐倉保證金與非零的累計已實現損益。
+    /// An account delta for an isolated short, carrying an isolated margin and a non-zero accumulated realised PnL.
+    /// </summary>
+    public const string AccountUpdateIsolated =
+        """{"e":"ACCOUNT_UPDATE","T":1789117392000,"E":1789117392004,"a":{"m":"ORDER","B":[{"a":"USDT","wb":"14990.00000000","cw":"14864.60000000","bc":"0"}],"P":[{"s":"ETHUSDT","pa":"-0.500","ep":"2500.00","bep":"2500.5","cr":"-3.25000000","up":"1.20000000","mt":"isolated","iw":"125.40000000","ps":"SHORT"}]}}""";
+
+    /// <summary>
+    /// 可選欄位(<c>cw</c>、<c>bc</c>、<c>cr</c>、<c>iw</c>)全部缺席的帳戶增量。
+    /// An account delta with every optional field — <c>cw</c>, <c>bc</c>, <c>cr</c>, <c>iw</c> — absent.
+    /// </summary>
+    public const string AccountUpdateWithoutOptionalFields =
+        """{"e":"ACCOUNT_UPDATE","T":1789117393000,"E":1789117393002,"a":{"m":"ORDER","B":[{"a":"USDT","wb":"14990.00000000"}],"P":[{"s":"BTCUSDT","pa":"0.001","ep":"73999.50000","up":"-0.00045000","mt":"isolated","ps":"BOTH"}]}}""";
+
+    /// <summary>少了開倉均價 <c>ep</c> 的帳戶增量。An account delta whose position lacks the entry price.</summary>
+    public const string AccountUpdateWithoutEntryPrice =
+        """{"e":"ACCOUNT_UPDATE","T":1789117394000,"E":1789117394002,"a":{"m":"ORDER","B":[],"P":[{"s":"BTCUSDT","pa":"0.001","up":"-0.00045000","mt":"cross","iw":"0","ps":"BOTH"}]}}""";
+
+    /// <summary>少了保證金模式 <c>mt</c> 的帳戶增量。An account delta whose position lacks the margin type.</summary>
+    public const string AccountUpdateWithoutMarginType =
+        """{"e":"ACCOUNT_UPDATE","T":1789117395000,"E":1789117395002,"a":{"m":"ORDER","B":[],"P":[{"s":"BTCUSDT","pa":"0.001","ep":"73999.50000","up":"-0.00045000","iw":"0","ps":"BOTH"}]}}""";
+
+    /// <summary>少了保證金模式 <c>mt</c> 的追繳警告。A margin call whose position lacks the margin type.</summary>
+    public const string MarginCallWithoutMarginType =
+        """{"e":"MARGIN_CALL","E":1789117383000,"cw":"3.16812045","p":[{"s":"ETHUSDT","ps":"LONG","pa":"1.327","iw":"0","mp":"7.10","up":"-1.166074","mm":"1.614445"}]}""";
+
     /// <summary>保證金追繳警告。A margin call.</summary>
     public const string MarginCall =
         """{"e":"MARGIN_CALL","E":1789117383000,"cw":"3.16812045","p":[{"s":"ETHUSDT","ps":"LONG","pa":"1.327","mt":"CROSSED","iw":"0","mp":"7.10","up":"-1.166074","mm":"1.614445"}]}""";
+
+    /// <summary>少了標記價 <c>mp</c> 的追繳警告。A margin call whose position lacks the mark price.</summary>
+    public const string MarginCallWithoutMarkPrice =
+        """{"e":"MARGIN_CALL","E":1789117383000,"cw":"3.16812045","p":[{"s":"ETHUSDT","ps":"LONG","pa":"1.327","mt":"CROSSED","iw":"0","up":"-1.166074","mm":"1.614445"}]}""";
+
+    /// <summary>
+    /// 逐倉部位的追繳警告,沒有 <c>cw</c> 也沒有 <c>mm</c>。
+    /// A margin call on an isolated position, with neither <c>cw</c> nor <c>mm</c>.
+    /// </summary>
+    public const string MarginCallIsolatedWithoutMaintenanceMargin =
+        """{"e":"MARGIN_CALL","E":1789117383500,"p":[{"s":"ETHUSDT","ps":"SHORT","pa":"-2.000","mt":"ISOLATED","iw":"12.50","mp":"2600.00","up":"-80.00"}]}""";
+
+    /// <summary>
+    /// 心跳 <c>LIST_SUBSCRIPTIONS</c> 的回覆。<b>形狀取自 Testnet 實測:<c>result</c> 裡就是憑證本身。</b>
+    /// The reply to the <c>LIST_SUBSCRIPTIONS</c> heartbeat. <b>The shape is as measured on the testnet: the
+    /// <c>result</c> array holds the credential itself.</b>
+    /// </summary>
+    /// <param name="listenKey">要放進回覆裡的憑證。The credential to embed.</param>
+    /// <param name="id">請求編號。The request id.</param>
+    /// <returns>回覆訊息。The reply frame.</returns>
+    public static string HeartbeatReply(string listenKey, long id) => string.Create(
+        CultureInfo.InvariantCulture,
+        $$"""{"result":["{{listenKey}}"],"id":{{id}}}""");
+
+    /// <summary>
+    /// 被拒的指令回覆,訊息裡刻意夾帶憑證 —— 用來驗證「被拒的回覆同樣不轉述」。
+    /// A rejected command reply whose message deliberately carries the credential, used to check that a rejection
+    /// is not relayed either.
+    /// </summary>
+    /// <param name="listenKey">要放進回覆裡的憑證。The credential to embed.</param>
+    /// <returns>回覆訊息。The reply frame.</returns>
+    public static string HeartbeatRejection(string listenKey) =>
+        $$"""{"error":{"code":2,"msg":"Invalid request: {{listenKey}}"},"id":9}""";
 
     /// <summary>
     /// 本套件不處理的事件型別。交易所會持續新增這類事件,它們不是錯誤。

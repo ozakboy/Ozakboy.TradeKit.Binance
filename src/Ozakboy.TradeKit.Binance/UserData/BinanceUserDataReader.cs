@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.Json;
 
+using Ozakboy.TradeKit.Binance.MarketData;
+
 namespace Ozakboy.TradeKit.Binance.UserData;
 
 /// <summary>
@@ -27,6 +29,25 @@ namespace Ozakboy.TradeKit.Binance.UserData;
 /// credential that reaches the account's private data. Truncating an unreadable frame into diagnostic data, as
 /// the market side does, is not available here: a failure from this type says which field could not be read and
 /// never what arrived.
+/// </para>
+/// <para>
+/// <b>指令回應判為忽略,而且內容一個字都不讀。</b> 這條連線上的心跳是 <c>LIST_SUBSCRIPTIONS</c>,
+/// Testnet 實測它的回應是 <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> —— <b>每一則心跳回應都帶著憑證本身</b>,
+/// 預設設定下每 30 秒一則。判別條件是「有 <c>id</c>、沒有 <c>e</c>」:交易所的事件一律帶 <c>e</c>,
+/// 指令回應一律帶 <c>id</c> 而不帶 <c>e</c>。判定之後 <c>result</c> 與 <c>error</c> 都不讀、不轉述;
+/// 被拒的回應(<c>{"error":…,"id":N}</c>)一併忽略,因為心跳被拒的後果只是那一次沒有刷新閒置計時,
+/// 閒置逾時會接手,而轉述它的內容就得先保證那段文字不含任何連線片段,這一點沒有辦法保證。
+/// 沒有 <c>id</c> 也沒有 <c>e</c> 的物件仍判失敗(只說缺少 <c>e</c>):那既不是事件也不是回應,是協定變了。
+/// <b>Command replies are ignored, and not one character of them is read.</b> The heartbeat on this connection
+/// is <c>LIST_SUBSCRIPTIONS</c>, and on the testnet its reply measured as
+/// <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> — <b>every heartbeat reply carries the credential itself</b>, one
+/// every 30 seconds under the defaults. The test is "has <c>id</c>, has no <c>e</c>": exchange events always carry
+/// <c>e</c>, and command replies always carry <c>id</c> without <c>e</c>. Once so classified, neither
+/// <c>result</c> nor <c>error</c> is read or relayed. A rejection (<c>{"error":…,"id":N}</c>) is ignored as well:
+/// a rejected heartbeat merely fails to refresh the idle clock once, which the idle timeout then handles, whereas
+/// relaying its content would first require proving the text carries no piece of the connection — which cannot
+/// be proven. An object with neither <c>id</c> nor <c>e</c> still fails, naming only the missing <c>e</c>: it is
+/// neither an event nor a reply, so the protocol has changed.
 /// </para>
 /// <para>
 /// <b><c>ORDER_TRADE_UPDATE</c> 的欄位對映</b>(欄位名取自官方 USDⓈ-M Futures User Data Streams 文件):
@@ -84,12 +105,39 @@ namespace Ozakboy.TradeKit.Binance.UserData;
 /// that misleads anything sorting by time.
 /// </para>
 /// <para>
-/// <b><c>ACCOUNT_UPDATE</c> 與 <c>MARGIN_CALL</c> 的欄位比抽象層少,缺的欄位<u>就是缺</u>。</b>
-/// 具體缺哪些、為什麼不猜,見 <see cref="ReadAccountUpdate"/> 與 <see cref="ReadMarginCall"/> 的說明。
-/// <b>The <c>ACCOUNT_UPDATE</c> and <c>MARGIN_CALL</c> payloads carry fewer fields than the abstraction has, and
-/// what is missing stays missing.</b> Which fields, and why nothing is guessed, is on
-/// <see cref="ReadAccountUpdate"/> and <see cref="ReadMarginCall"/>.
+/// <b><c>ACCOUNT_UPDATE</c> 與 <c>MARGIN_CALL</c> 對映到只含事件欄位的增量型別。</b>
+/// <see cref="PositionChange"/>、<see cref="BalanceChange"/>、<see cref="MarginCallPosition"/> 刻意沒有事件不帶的
+/// 欄位(帳戶變動沒有標記價、名目價值、槓桿、可用餘額),所以這裡不必、也無從替它們填值。
+/// 事件<b>可能</b>不帶的欄位對映成 <see langword="null"/>,不是零:零是一個說得出口的數字,
+/// 「交易所沒說」不是。
+/// <b><c>ACCOUNT_UPDATE</c> and <c>MARGIN_CALL</c> map onto delta types holding only what the events carry.</b>
+/// <see cref="PositionChange"/>, <see cref="BalanceChange"/>, and <see cref="MarginCallPosition"/> deliberately
+/// lack the fields these events do not deliver — an account change has no mark price, notional, leverage, or
+/// available balance — so there is nothing to fill in and no way to. A field an event <b>may</b> omit maps to
+/// <see langword="null"/> rather than zero: zero is a number one can state, and "the exchange did not say" is
+/// not.
 /// </para>
+/// <list type="table">
+/// <listheader>
+/// <term>幣安欄位 / Binance field</term>
+/// <description>對映到 / Mapped to</description>
+/// </listheader>
+/// <item><term><c>a.m</c></term><description><see cref="AccountUpdate.Reason"/> 與 <see cref="AccountUpdate.RawReason"/></description></item>
+/// <item><term><c>a.B[].a</c>、<c>a.B[].wb</c></term><description><see cref="BalanceChange.Asset"/>、<see cref="BalanceChange.WalletBalance"/>(必填)</description></item>
+/// <item><term><c>a.B[].cw</c></term><description><see cref="BalanceChange.CrossWalletBalance"/>(缺席為 <see langword="null"/>)</description></item>
+/// <item><term><c>a.B[].bc</c></term><description><see cref="BalanceChange.NonTradingChange"/>(缺席為 <see langword="null"/>)</description></item>
+/// <item><term><c>a.P[].s</c>、<c>a.P[].pa</c>、<c>a.P[].ep</c>、<c>a.P[].up</c></term><description><see cref="PositionChange.Symbol"/>、<see cref="PositionChange.Quantity"/>、<see cref="PositionChange.EntryPrice"/>、<see cref="PositionChange.UnrealizedPnl"/>(必填)</description></item>
+/// <item><term><c>a.P[].ps</c>、<c>a.P[].mt</c></term><description><see cref="PositionChange.Side"/>、<see cref="PositionChange.MarginMode"/></description></item>
+/// <item><term><c>a.P[].cr</c></term><description><see cref="PositionChange.AccumulatedRealizedPnl"/>(缺席為 <see langword="null"/>)</description></item>
+/// <item><term><c>a.P[].iw</c></term><description><see cref="PositionChange.IsolatedMargin"/>(只有逐倉部位有值;全倉或缺席為 <see langword="null"/>)</description></item>
+/// <item><term><c>a.P[].bep</c></term><description>損益兩平價,抽象層沒有對應欄位,不對映。</description></item>
+/// <item><term><c>cw</c></term><description><see cref="MarginCall.CrossWalletBalance"/>(缺席為 <see langword="null"/>)</description></item>
+/// <item><term><c>p[].s</c>、<c>p[].pa</c>、<c>p[].up</c></term><description><see cref="MarginCallPosition.Symbol"/>、<see cref="MarginCallPosition.Quantity"/>、<see cref="MarginCallPosition.UnrealizedPnl"/>(必填)</description></item>
+/// <item><term><c>p[].mp</c></term><description><see cref="MarginCallPosition.MarkPrice"/>(必填,理由見 <see cref="ReadMarginCall"/>)</description></item>
+/// <item><term><c>p[].ps</c>、<c>p[].mt</c></term><description><see cref="MarginCallPosition.Side"/>、<see cref="MarginCallPosition.MarginMode"/></description></item>
+/// <item><term><c>p[].iw</c></term><description><see cref="MarginCallPosition.IsolatedMargin"/>(只有逐倉部位有值;全倉或缺席為 <see langword="null"/>)</description></item>
+/// <item><term><c>p[].mm</c></term><description><see cref="MarginCallPosition.MaintenanceMargin"/>(缺席為 <see langword="null"/>)</description></item>
+/// </list>
 /// </remarks>
 internal static class BinanceUserDataReader
 {
@@ -165,17 +213,23 @@ internal static class BinanceUserDataReader
 
     private const string CrossWalletBalanceField = "cw";
 
+    private const string BalanceChangeField = "bc";
+
     private const string PositionAmountField = "pa";
 
     private const string EntryPriceField = "ep";
 
     private const string UnrealizedPnlField = "up";
 
+    private const string AccumulatedRealizedField = "cr";
+
     private const string MarginTypeField = "mt";
 
     private const string IsolatedWalletField = "iw";
 
     private const string MarkPriceField = "mp";
+
+    private const string MaintenanceMarginField = "mm";
 
     /// <summary>
     /// 有成交時 <c>o.x</c> 會是這個值。
@@ -240,6 +294,16 @@ internal static class BinanceUserDataReader
             {
                 return BinanceErrors.MalformedResponse(
                     $"{BinanceUserDataPaths.Context} 收到的訊息不是 JSON 物件。The frame received on the {BinanceUserDataPaths.Context} is not a JSON object.");
+            }
+
+            // 心跳的回應:有 id、沒有 e。這一支必須排在任何欄位讀取之前,而且只看「有沒有」,
+            // 不看值 —— 回應的 result 裡就是憑證,理由見類別說明。
+            // A heartbeat reply: an id and no e. This branch has to come before any field is read, and it checks
+            // presence only, never values — the reply's result is the credential; see the type remarks.
+            if (!root.TryGetProperty(EventTypeField, out _)
+                && root.TryGetProperty(BinanceStreamCommands.IdProperty, out _))
+            {
+                return Result.Success(BinanceUserDataEvent.FromCommandReply());
             }
 
             if (!BinanceJson.TryGetString(root, EventTypeField, out var eventType))
@@ -459,19 +523,13 @@ internal static class BinanceUserDataReader
     /// and an update that only moved a position makes a USDT account look emptied.
     /// </para>
     /// <para>
-    /// <b>這個事件不帶的欄位:</b><see cref="Balance.AvailableBalance"/>、<see cref="Balance.UnrealizedPnl"/>
-    /// (事件只有錢包餘額 <c>wb</c> 與全倉錢包餘額 <c>cw</c>)、<see cref="Position.MarkPrice"/>、
-    /// <see cref="Position.Leverage"/>、<see cref="Position.LiquidationPrice"/>。它們會停在型別的預設值。
-    /// <b>特別注意 <see cref="Position.MarkPrice"/> 為零的後果:</b><see cref="Position.Notional"/> 是用它算的,
-    /// 所以從這個事件建出來的部位,名目價值一律是零,也就是「看起來沒有風險」。
-    /// 風控要判斷曝險請用 <c>/fapi/v2/positionRisk</c> 或行情的標記價串流,不要用這裡的部位。
-    /// <b>Fields this event does not carry:</b> <see cref="Balance.AvailableBalance"/>,
-    /// <see cref="Balance.UnrealizedPnl"/> — the event has only the wallet balance <c>wb</c> and the cross
-    /// wallet balance <c>cw</c> — plus <see cref="Position.MarkPrice"/>, <see cref="Position.Leverage"/>, and
-    /// <see cref="Position.LiquidationPrice"/>. They stay at their type defaults. <b>Mind what a zero
-    /// <see cref="Position.MarkPrice"/> does:</b> <see cref="Position.Notional"/> is derived from it, so a
-    /// position built from this event always has zero notional, which reads as no risk at all. Exposure belongs
-    /// to <c>/fapi/v2/positionRisk</c> or the mark price stream, not to the positions here.
+    /// <b>開倉均價 <c>ep</c> 缺席時整則判失敗。</b> 帳戶變動的每一筆部位都帶這個欄位;
+    /// 缺了就填零,會讓一個還開著的部位看起來「進場價為零」,而 <see cref="PositionChange.EntryPrice"/>
+    /// 的零本來是留給「已平倉」的,兩者從此分不開。
+    /// <b>A missing entry price <c>ep</c> fails the frame.</b> Every position entry of an account change carries
+    /// it; defaulting it to zero would give an open position an entry price of zero, while
+    /// <see cref="PositionChange.EntryPrice"/> reserves zero for a closed one, and the two would become
+    /// indistinguishable.
     /// </para>
     /// </remarks>
     private static Result<BinanceUserDataEvent> ReadAccountUpdate(JsonElement root, DateTimeOffset eventTime)
@@ -483,14 +541,17 @@ internal static class BinanceUserDataReader
 
         var rawReason = BinanceJson.TryGetString(account, UpdateReasonField, out var reason) ? reason : null;
 
-        var balances = ReadBalances(account);
+        // 這次沒有任何餘額(或部位)變動,欄位就不會出現。空清單是正確的答案,不是失敗。
+        // The field is simply absent when no balance (or position) changed. An empty list is the right answer,
+        // not a failure.
+        var balances = ReadEntries<BalanceChange>(account, BalancesField, required: false, ReadBalanceChange);
 
         if (!balances.TryGetValue(out var readBalances))
         {
             return balances.ToFailure<BinanceUserDataEvent>();
         }
 
-        var positions = ReadPositions(account, PositionsField, eventTime, requireMarkPrice: false);
+        var positions = ReadEntries<PositionChange>(account, PositionsField, required: false, ReadPositionChange);
 
         if (!positions.TryGetValue(out var readPositions))
         {
@@ -518,18 +579,20 @@ internal static class BinanceUserDataReader
     /// <returns>判讀結果。The outcome.</returns>
     /// <remarks>
     /// 與 <c>ACCOUNT_UPDATE</c> 不同,這個事件<b>有</b>標記價(<c>mp</c>)—— 交易所要警告的正是
-    /// 「以目前標記價來看,這些部位快撐不住了」,少了它這則警告就沒有意義,因此標記價缺席時判失敗。
-    /// 至於 <see cref="Position.EntryPrice"/> 與 <see cref="Position.Leverage"/> 這個事件沒有,
-    /// 停在型別預設值;要用到它們請另外查持倉。
+    /// 「以目前標記價來看,這些部位快撐不住了」,少了它這則警告就沒有意義,
+    /// <see cref="MarginCallPosition.Notional"/> 也會跟著變成零,因此標記價缺席時判失敗。
     /// Unlike <c>ACCOUNT_UPDATE</c>, this event <b>does</b> carry the mark price in <c>mp</c> — the warning is
-    /// precisely that these positions are close to failing at the current mark, and without it the warning
-    /// means nothing, so a missing mark price fails the frame. <see cref="Position.EntryPrice"/> and
-    /// <see cref="Position.Leverage"/> are absent and stay at their defaults; code needing them has to query
-    /// the positions separately.
+    /// precisely that these positions are close to failing at the current mark. Without it the warning means
+    /// nothing and <see cref="MarginCallPosition.Notional"/> collapses to zero along with it, so a missing mark
+    /// price fails the frame.
     /// </remarks>
     private static Result<BinanceUserDataEvent> ReadMarginCall(JsonElement root, DateTimeOffset eventTime)
     {
-        var positions = ReadPositions(root, MarginCallPositionsField, eventTime, requireMarkPrice: true);
+        var positions = ReadEntries<MarginCallPosition>(
+            root,
+            MarginCallPositionsField,
+            required: true,
+            ReadMarginCallPosition);
 
         if (!positions.TryGetValue(out var readPositions))
         {
@@ -543,75 +606,45 @@ internal static class BinanceUserDataReader
                 // 而後者代表帳戶已經空了。
                 // Absent means null rather than zero: zero would make "the cross balance is unknown" look like
                 // "the cross balance happens to be zero", and the latter says the account is empty.
-                CrossWalletBalance = BinanceJson.TryGetDecimal(root, CrossWalletBalanceField, out var crossWallet)
-                    ? crossWallet
-                    : null,
+                CrossWalletBalance = ReadOptionalDecimal(root, CrossWalletBalanceField),
                 Positions = readPositions,
                 Timestamp = eventTime,
             },
             eventTime));
     }
 
-    private static Result<IReadOnlyList<Balance>> ReadBalances(JsonElement account)
-    {
-        if (!account.TryGetProperty(BalancesField, out var array))
-        {
-            // 這次沒有任何餘額變動,欄位就不會出現。空清單是正確的答案,不是失敗。
-            // The field is simply absent when no balance changed. An empty list is the right answer, not a
-            // failure.
-            return Result.Success<IReadOnlyList<Balance>>([]);
-        }
-
-        if (array.ValueKind != JsonValueKind.Array)
-        {
-            return BinanceErrors.MissingField(BalancesField, BinanceUserDataPaths.Context);
-        }
-
-        var balances = new List<Balance>(array.GetArrayLength());
-
-        foreach (var element in array.EnumerateArray())
-        {
-            if (element.ValueKind != JsonValueKind.Object)
-            {
-                return BinanceErrors.MalformedResponse(
-                    $"{BinanceUserDataPaths.Context} 的餘額陣列元素不是 JSON 物件。An element of the balance array on the {BinanceUserDataPaths.Context} is not a JSON object.");
-            }
-
-            if (!BinanceJson.TryGetString(element, AssetField, out var asset))
-            {
-                return BinanceErrors.MissingField(AssetField, BinanceUserDataPaths.Context);
-            }
-
-            if (!BinanceJson.TryGetDecimal(element, WalletBalanceField, out var walletBalance))
-            {
-                return BinanceErrors.MissingField(WalletBalanceField, asset);
-            }
-
-            balances.Add(new Balance
-            {
-                Asset = asset,
-                WalletBalance = walletBalance,
-
-                // 可用餘額與未實現損益這個事件都沒有,停在零,理由見 ReadAccountUpdate 的說明。
-                // The available balance and the unrealised PnL are not in this event and stay at zero; see the
-                // remarks on ReadAccountUpdate.
-            });
-        }
-
-        return Result.Success<IReadOnlyList<Balance>>(balances);
-    }
-
-    private static Result<IReadOnlyList<Position>> ReadPositions(
+    /// <summary>
+    /// 讀出一個物件陣列的每一個元素。
+    /// Reads every element of an array of objects.
+    /// </summary>
+    /// <typeparam name="T">元素對映成的型別。The type each element maps onto.</typeparam>
+    /// <param name="container">陣列所在的物件。The object holding the array.</param>
+    /// <param name="propertyName">陣列的欄位名。The array's property name.</param>
+    /// <param name="required">
+    /// 欄位缺席時是否判失敗。帳戶增量沒變動就不帶欄位,追繳警告則一定帶。
+    /// Whether an absent property fails. An account delta omits it when nothing changed; a margin call always
+    /// carries it.
+    /// </param>
+    /// <param name="readEntry">讀一個元素的方法。Reads one element.</param>
+    /// <returns>讀出的元素,或第一個讀不出來的元素的失敗。The elements, or the failure of the first unreadable one.</returns>
+    /// <remarks>
+    /// 任何一個元素讀不出來就整則判失敗,不跳過。跳過一筆部位增量,本地的部位就停在舊值,
+    /// 而沒有任何東西會提醒這件事。
+    /// One unreadable element fails the whole frame rather than being skipped: skipping a position delta leaves the
+    /// local position at its old value with nothing to say so.
+    /// </remarks>
+    private static Result<IReadOnlyList<T>> ReadEntries<T>(
         JsonElement container,
         string propertyName,
-        DateTimeOffset eventTime,
-        bool requireMarkPrice)
+        bool required,
+        Func<JsonElement, Result<T>> readEntry)
+        where T : class
     {
         if (!container.TryGetProperty(propertyName, out var array))
         {
-            return requireMarkPrice
+            return required
                 ? BinanceErrors.MissingField(propertyName, BinanceUserDataPaths.Context)
-                : Result.Success<IReadOnlyList<Position>>([]);
+                : Result.Success<IReadOnlyList<T>>([]);
         }
 
         if (array.ValueKind != JsonValueKind.Array)
@@ -619,27 +652,112 @@ internal static class BinanceUserDataReader
             return BinanceErrors.MissingField(propertyName, BinanceUserDataPaths.Context);
         }
 
-        var positions = new List<Position>(array.GetArrayLength());
+        var entries = new List<T>(array.GetArrayLength());
 
         foreach (var element in array.EnumerateArray())
         {
-            var position = ReadPosition(element, eventTime, requireMarkPrice);
+            var entry = readEntry(element);
 
-            if (!position.TryGetValue(out var value))
+            if (!entry.TryGetValue(out var value))
             {
-                return position.ToFailure<IReadOnlyList<Position>>();
+                return entry.ToFailure<IReadOnlyList<T>>();
             }
 
-            positions.Add(value);
+            entries.Add(value);
         }
 
-        return Result.Success<IReadOnlyList<Position>>(positions);
+        return Result.Success<IReadOnlyList<T>>(entries);
     }
 
-    private static Result<Position> ReadPosition(
-        JsonElement element,
-        DateTimeOffset eventTime,
-        bool requireMarkPrice)
+    private static Result<BalanceChange> ReadBalanceChange(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return BinanceErrors.MalformedResponse(
+                $"{BinanceUserDataPaths.Context} 的餘額陣列元素不是 JSON 物件。An element of the balance array on the {BinanceUserDataPaths.Context} is not a JSON object.");
+        }
+
+        if (!BinanceJson.TryGetString(element, AssetField, out var asset))
+        {
+            return BinanceErrors.MissingField(AssetField, BinanceUserDataPaths.Context);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, WalletBalanceField, out var walletBalance))
+        {
+            return BinanceErrors.MissingField(WalletBalanceField, asset);
+        }
+
+        return new BalanceChange
+        {
+            Asset = asset,
+            WalletBalance = walletBalance,
+            CrossWalletBalance = ReadOptionalDecimal(element, CrossWalletBalanceField),
+
+            // 入金、出金、轉帳造成的變動量。權益曲線要扣掉的就是它,所以缺席時是「不知道」而不是「零」——
+            // 零會讓一筆入金被當成策略賺的。
+            // The change from deposits, withdrawals, and transfers — what an equity curve takes out. Absent means
+            // unknown rather than zero, because zero would count a deposit as something the strategy earned.
+            NonTradingChange = ReadOptionalDecimal(element, BalanceChangeField),
+        };
+    }
+
+    private static Result<PositionChange> ReadPositionChange(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return BinanceErrors.MalformedResponse(
+                $"{BinanceUserDataPaths.Context} 的部位陣列元素不是 JSON 物件。An element of the position array on the {BinanceUserDataPaths.Context} is not a JSON object.");
+        }
+
+        if (!BinanceJson.TryGetString(element, SymbolField, out var symbol))
+        {
+            return BinanceErrors.MissingField(SymbolField, BinanceUserDataPaths.Context);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, PositionAmountField, out var quantity))
+        {
+            return WithSymbol(BinanceErrors.MissingField(PositionAmountField, symbol), symbol);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, EntryPriceField, out var entryPrice))
+        {
+            // 理由見 ReadAccountUpdate 的說明:零是留給「已平倉」的。
+            // See the remarks on ReadAccountUpdate: zero is reserved for a closed position.
+            return WithSymbol(BinanceErrors.MissingField(EntryPriceField, symbol), symbol);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, UnrealizedPnlField, out var unrealizedPnl))
+        {
+            return WithSymbol(BinanceErrors.MissingField(UnrealizedPnlField, symbol), symbol);
+        }
+
+        if (!BinanceJson.TryGetString(element, MarginTypeField, out var marginType))
+        {
+            // 缺席就判失敗,不猜 —— 與 REST 持倉查詢(BinanceResponseReader)的處理一致。
+            // 原本缺席會落到「不是 cross 就是逐倉」那一支,等於替資料編一個值:全倉部位被讀成逐倉,
+            // 保證金與強平的計算整個走錯邊,而欄位看起來完全正常。
+            // Absent means failure, never a guess — matching the REST position reader. Previously an absent
+            // value fell through to "not cross, therefore isolated", inventing a value: a cross position read as
+            // isolated sends every margin and liquidation calculation down the wrong branch while looking normal.
+            return WithSymbol(BinanceErrors.MissingField(MarginTypeField, symbol), symbol);
+        }
+
+        var marginMode = ParseMarginMode(marginType);
+
+        return new PositionChange
+        {
+            Symbol = symbol,
+            Quantity = quantity,
+            Side = ReadPositionSide(element),
+            EntryPrice = entryPrice,
+            UnrealizedPnl = unrealizedPnl,
+            AccumulatedRealizedPnl = ReadOptionalDecimal(element, AccumulatedRealizedField),
+            MarginMode = marginMode,
+            IsolatedMargin = ReadIsolatedMargin(element, marginMode),
+        };
+    }
+
+    private static Result<MarginCallPosition> ReadMarginCallPosition(JsonElement element)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
@@ -662,34 +780,60 @@ internal static class BinanceUserDataReader
             return WithSymbol(BinanceErrors.MissingField(UnrealizedPnlField, symbol), symbol);
         }
 
-        var markPrice = 0m;
-
-        if (requireMarkPrice && !BinanceJson.TryGetDecimal(element, MarkPriceField, out markPrice))
+        if (!BinanceJson.TryGetDecimal(element, MarkPriceField, out var markPrice))
         {
+            // 標記價是這則警告的全部意義,理由見 ReadMarginCall 的說明。
+            // The mark price is the whole point of the warning; see the remarks on ReadMarginCall.
             return WithSymbol(BinanceErrors.MissingField(MarkPriceField, symbol), symbol);
         }
 
-        return new Position
+        if (!BinanceJson.TryGetString(element, MarginTypeField, out var marginType))
+        {
+            // 缺席就判失敗,不猜 —— 與 REST 持倉查詢(BinanceResponseReader)的處理一致。
+            // 原本缺席會落到「不是 cross 就是逐倉」那一支,等於替資料編一個值:全倉部位被讀成逐倉,
+            // 保證金與強平的計算整個走錯邊,而欄位看起來完全正常。
+            // Absent means failure, never a guess — matching the REST position reader. Previously an absent
+            // value fell through to "not cross, therefore isolated", inventing a value: a cross position read as
+            // isolated sends every margin and liquidation calculation down the wrong branch while looking normal.
+            return WithSymbol(BinanceErrors.MissingField(MarginTypeField, symbol), symbol);
+        }
+
+        var marginMode = ParseMarginMode(marginType);
+
+        return new MarginCallPosition
         {
             Symbol = symbol,
             Quantity = quantity,
-            Side = BinanceOrderMapper.ParsePositionSide(
-                BinanceJson.TryGetString(element, PositionSideField, out var positionSide) ? positionSide : null),
-
-            // 進場價只有 ACCOUNT_UPDATE 帶,MARGIN_CALL 沒有。缺席時停在零,不猜。
-            // The entry price comes with ACCOUNT_UPDATE and not with MARGIN_CALL; when absent it stays at zero
-            // rather than being guessed.
-            EntryPrice = BinanceJson.TryGetDecimal(element, EntryPriceField, out var entryPrice) ? entryPrice : 0m,
+            Side = ReadPositionSide(element),
             MarkPrice = markPrice,
             UnrealizedPnl = unrealizedPnl,
-            MarginMode = ParseMarginMode(
-                BinanceJson.TryGetString(element, MarginTypeField, out var marginType) ? marginType : null),
-            Margin = BinanceJson.TryGetDecimal(element, IsolatedWalletField, out var isolatedWallet)
-                ? isolatedWallet
-                : 0m,
-            UpdatedAt = eventTime,
+            MaintenanceMargin = ReadOptionalDecimal(element, MaintenanceMarginField),
+            MarginMode = marginMode,
+            IsolatedMargin = ReadIsolatedMargin(element, marginMode),
         };
     }
+
+    /// <summary>
+    /// 讀逐倉保證金:只有逐倉部位有這個值。
+    /// Reads the isolated margin, which only an isolated position has.
+    /// </summary>
+    /// <param name="element">部位物件。The position object.</param>
+    /// <param name="marginMode">這個部位的保證金模式。The position's margin mode.</param>
+    /// <returns>逐倉保證金;全倉部位或欄位缺席時為 <see langword="null"/>。The isolated margin, or null.</returns>
+    /// <remarks>
+    /// 全倉部位的 <c>iw</c> 一律是 <c>"0"</c>。照抄會得到一個「逐倉保證金為零」的全倉部位 ——
+    /// 型別文件把這個欄位定義成「全倉為 <see langword="null"/>」,正是為了讓讀的人不必知道這個慣例。
+    /// A cross position's <c>iw</c> is always <c>"0"</c>, and copying it through yields a cross position with an
+    /// isolated margin of zero. The type defines the field as null for cross precisely so that readers need not know
+    /// that convention.
+    /// </remarks>
+    private static decimal? ReadIsolatedMargin(JsonElement element, MarginMode marginMode) =>
+        marginMode == MarginMode.Isolated ? ReadOptionalDecimal(element, IsolatedWalletField) : null;
+
+    private static PositionSide ReadPositionSide(JsonElement element) =>
+        BinanceOrderMapper.ParsePositionSide(
+            BinanceJson.TryGetString(element, PositionSideField, out var positionSide) ? positionSide : null);
+
 
     /// <summary>
     /// 把 <c>a.m</c> 的原因代碼對映成中立的原因。
@@ -719,7 +863,7 @@ internal static class BinanceUserDataReader
         _ => AccountUpdateReason.Unknown,
     };
 
-    private static MarginMode ParseMarginMode(string? value) =>
+    private static MarginMode ParseMarginMode(string value) =>
         string.Equals(value, CrossMarginType, StringComparison.OrdinalIgnoreCase)
         || string.Equals(value, CrossedMarginType, StringComparison.OrdinalIgnoreCase)
             ? MarginMode.Cross
@@ -737,6 +881,16 @@ internal static class BinanceUserDataReader
 
     private static decimal? ReadOptionalPrice(JsonElement element, string propertyName) =>
         BinanceJson.TryGetDecimal(element, propertyName, out var value) && value > 0m ? value : null;
+
+    /// <summary>
+    /// 讀一個交易所可能不給的數值;缺席時為 <see langword="null"/>,不是零。
+    /// Reads a number the exchange may omit; absent is <see langword="null"/>, never zero.
+    /// </summary>
+    /// <param name="element">所在的物件。The containing object.</param>
+    /// <param name="propertyName">欄位名。The property name.</param>
+    /// <returns>讀到的值,或 <see langword="null"/>。The value, or <see langword="null"/>.</returns>
+    private static decimal? ReadOptionalDecimal(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetDecimal(element, propertyName, out var value) ? value : null;
 
     private static Error WithSymbol(Error error, string symbol) =>
         error.WithData(BinanceErrorDataKeys.Symbol, symbol);

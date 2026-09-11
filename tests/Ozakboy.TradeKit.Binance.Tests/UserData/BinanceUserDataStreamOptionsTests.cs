@@ -1,3 +1,4 @@
+using Ozakboy.TradeKit.Binance.MarketData;
 using Ozakboy.WebSockets;
 
 namespace Ozakboy.TradeKit.Binance.Tests.UserData;
@@ -9,6 +10,12 @@ namespace Ozakboy.TradeKit.Binance.Tests.UserData;
 [TestClass]
 public sealed class BinanceUserDataStreamOptionsTests
 {
+    /// <summary>
+    /// 測試用的連線位址。路徑段是假的 —— 真的位址含憑證,不該出現在任何測試資料以外的地方。
+    /// The address used here. Its path segment is fake: a real one embeds the credential.
+    /// </summary>
+    private static readonly Uri StreamUri = new("wss://stream.binancefuture.com/ws/not-a-listen-key", UriKind.Absolute);
+
     [TestMethod]
     public void TheDefaultsAreValid()
     {
@@ -59,15 +66,101 @@ public sealed class BinanceUserDataStreamOptionsTests
     }
 
     [TestMethod]
-    public void ANegativeIdleTimeoutIsRejectedWhileZeroIsAccepted()
+    public void LivenessDetectionIsOnByDefaultAndMatchesTheMarketStream()
     {
-        // 零是「不做存活偵測」,不是筆誤;負值才是筆誤。
-        // Zero means liveness detection is off rather than being a typo; a negative value is the typo.
+        // 心跳解決了「帳戶的正常沉默」與「死掉的連線」分不開的問題,所以預設開啟,並與行情串流同值 ——
+        // 兩條串流用同一個心跳指令,同一個設定值不該在兩邊代表不同的意思。
+        // The heartbeat is what tells an account's normal silence from a dead connection, so liveness is on by
+        // default and matches the market stream: both use the same heartbeat, and one value should not mean two
+        // things.
+        var options = new BinanceUserDataStreamOptions();
+
+        Assert.AreEqual(BinanceMarketStreamOptions.DefaultIdleTimeout, options.IdleTimeout);
+        Assert.AreEqual(BinanceMarketStreamOptions.DefaultKeepAliveInterval, options.KeepAliveInterval);
+        Assert.AreEqual(TimeSpan.FromSeconds(90), options.IdleTimeout);
+        Assert.AreEqual(TimeSpan.FromSeconds(30), options.KeepAliveInterval);
+        Assert.IsLessThan(options.IdleTimeout, options.KeepAliveInterval);
+    }
+
+    [TestMethod]
+    public void ANonPositiveIdleTimeoutIsRejected()
+    {
+        // 與行情串流一致:沒有閒置逾時,死掉的連線永遠不會被發現,而帳戶串流上那代表成交照樣發生、本地卻不知道。
+        // As on the market stream: without an idle timeout a dead connection is never noticed, which on the
+        // account stream means fills happening that the local side never learns about.
+        Assert.IsTrue(
+            new BinanceUserDataStreamOptions { IdleTimeout = TimeSpan.Zero }.Validate().IsFailure);
         Assert.IsTrue(
             new BinanceUserDataStreamOptions { IdleTimeout = TimeSpan.FromSeconds(-1) }.Validate().IsFailure);
+    }
 
+    [TestMethod]
+    public void AHeartbeatSlowerThanTheIdleTimeoutIsRejected()
+    {
+        // 安靜的帳戶會在兩次心跳之間被判死並無止境重連,每一次都要求一次全量對帳。
+        // A quiet account would be condemned between beats and reconnect for ever, each time demanding a full
+        // reconciliation.
+        var validation = new BinanceUserDataStreamOptions
+        {
+            IdleTimeout = TimeSpan.FromSeconds(30),
+            KeepAliveInterval = TimeSpan.FromSeconds(30),
+        }.Validate();
+
+        Assert.IsTrue(validation.IsFailure);
+        Assert.AreEqual(BinanceErrorCodes.InvalidOptions, validation.Error?.Code);
+    }
+
+    [TestMethod]
+    public void ANegativeHeartbeatIsRejected()
+    {
         Assert.IsTrue(
-            new BinanceUserDataStreamOptions { IdleTimeout = TimeSpan.Zero }.Validate().IsSuccess);
+            new BinanceUserDataStreamOptions { KeepAliveInterval = TimeSpan.FromSeconds(-1) }.Validate().IsFailure);
+    }
+
+    [TestMethod]
+    public void ADisabledHeartbeatIsAllowedAndConfiguresNoPing()
+    {
+        var options = new BinanceUserDataStreamOptions { KeepAliveInterval = TimeSpan.Zero };
+
+        Assert.IsTrue(options.Validate().IsSuccess);
+
+        var created = CreateWebSocketOptions(options);
+
+        Assert.AreEqual(TimeSpan.Zero, created.ApplicationPingInterval);
+        Assert.IsNull(created.ApplicationPingPayloadFactory);
+    }
+
+    [TestMethod]
+    public void TheConnectionLayerSettingsCarryEveryValueAcross()
+    {
+        var options = new BinanceUserDataStreamOptions
+        {
+            IdleTimeout = TimeSpan.FromSeconds(45),
+            KeepAliveInterval = TimeSpan.FromSeconds(15),
+            ConnectTimeout = TimeSpan.FromSeconds(7),
+            MaxReconnectAttempts = 3,
+            ConnectionQueueCapacity = 64,
+            BackpressureStrategy = BackpressureStrategy.DropNewest,
+        };
+
+        var created = CreateWebSocketOptions(options);
+
+        Assert.AreEqual(StreamUri, created.Uri);
+        Assert.AreEqual(TimeSpan.FromSeconds(45), created.IdleTimeout);
+        Assert.AreEqual(TimeSpan.FromSeconds(15), created.ApplicationPingInterval);
+        Assert.AreEqual(TimeSpan.FromSeconds(7), created.ConnectTimeout);
+        Assert.AreEqual(3, created.MaxReconnectAttempts);
+        Assert.AreEqual(64, created.QueueCapacity);
+        Assert.AreEqual(BackpressureStrategy.DropNewest, created.BackpressureStrategy);
+        Assert.IsTrue(created.Validate().IsSuccess);
+    }
+
+    [TestMethod]
+    public void TheHeartbeatPayloadIsAListSubscriptionsCommand()
+    {
+        var created = CreateWebSocketOptions(new BinanceUserDataStreamOptions());
+
+        Assert.AreEqual("""{"method":"LIST_SUBSCRIPTIONS","id":1}""", created.ApplicationPingPayloadFactory!());
     }
 
     [TestMethod]
@@ -101,14 +194,6 @@ public sealed class BinanceUserDataStreamOptionsTests
         Assert.AreEqual(BackpressureStrategy.Wait, new BinanceUserDataStreamOptions().BackpressureStrategy);
     }
 
-    [TestMethod]
-    public void LivenessDetectionIsOffByDefault()
-    {
-        // 一個沒有委託、沒有成交、沒有資金費結算的帳戶本來就可以安靜好幾個小時,那是正常的沉默;
-        // 在這種串流上設逾時,等於每隔那麼久就無故重連一次並逼上層做一次不必要的全量對帳。
-        // An account with no orders, no fills, and no funding is entitled to hours of silence, and that silence
-        // is normal; a timeout here means an unprompted reconnect that often and an unnecessary full
-        // reconciliation each time.
-        Assert.AreEqual(TimeSpan.Zero, new BinanceUserDataStreamOptions().IdleTimeout);
-    }
+    private static WebSocketClientOptions CreateWebSocketOptions(BinanceUserDataStreamOptions options) =>
+        options.CreateWebSocketOptions(StreamUri, static () => BinanceStreamCommands.ListSubscriptions(1));
 }
