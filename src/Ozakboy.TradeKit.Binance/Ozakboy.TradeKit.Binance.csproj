@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>Ozakboy.TradeKit.Binance</PackageId>
+    <AssemblyName>Ozakboy.TradeKit.Binance</AssemblyName>
+    <RootNamespace>Ozakboy.TradeKit.Binance</RootNamespace>
+
+    <Title>Ozakboy.TradeKit.Binance — 幣安 USDⓈ-M 永續合約交易所實作</Title>
+    <Description>Ozakboy.TradeKit.Abstractions 的幣安 USDⓈ-M 永續合約實作,建構在 Ozakboy.Http 的簽章／限流／重試管線之上,不使用任何第三方社群套件。本版提供交易規則(exchangeInfo 的 PRICE_FILTER / LOT_SIZE / MIN_NOTIONAL / MARKET_LOT_SIZE)對映與每日快照快取、伺服器時間、唯讀帳戶與持倉查詢,以及幣安錯誤碼到交易所中立錯誤碼的完整對映(時間戳偏移、簽章無效、IP 白名單、保證金不足、限流各自可辨識)。REST 與 WebSocket 端點以「環境」成組提供,杜絕主網與 Testnet 混接;交易規則快取以環境為鍵,避免 Testnet 的步進值被誤用到主網。A Binance USDⓈ-M perpetual futures implementation of Ozakboy.TradeKit.Abstractions, built on the Ozakboy.Http signing, rate-limiting, and retry pipeline with no third-party dependencies. This release covers exchange-info trading rules with a per-environment daily cache, server time, read-only account and position queries, and a full Binance-to-neutral error code mapping.</Description>
+    <PackageTags>ozakboy;tradekit;binance;binance-futures;usds-m;perpetual;futures;exchange;trading;exchangeinfo;tick-size;step-size;min-notional;hmac-sha256;rate-limit;testnet;result-type;decimal;dotnet;csharp</PackageTags>
+
+    <PackageProjectUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</RepositoryUrl>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!--
+    這兩個命名空間幾乎每個檔案都用到(Result/Error 與全部交易模型),集中宣告成隱含 using,
+    避免每個檔案開頭重複四行,也避免 XML 註解裡的 cref 反過來讓 IDE0005 判成未使用的 using。
+    Both namespaces are used by almost every file, so they are declared once as implicit usings.
+  -->
+  <ItemGroup>
+    <Using Include="Ozakboy.Core.Abstractions" />
+    <Using Include="Ozakboy.TradeKit.Abstractions" />
+  </ItemGroup>
+
+  <!-- 內部解析輔助型別需要直接測試,它們不屬於公開契約。 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ozakboy.TradeKit.Binance.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\logo.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!--
+    相依政策:只允許 .NET BCL、Microsoft 官方套件與 Ozakboy.* 自研套件,判定看「遞移相依」而非套件名稱。
+    這正是本套件存在的理由 —— 幣安的第三方社群套件(Binance.Net 等)一律不使用。
+    Ozakboy.Core.Abstractions 明確指定 0.3.0:Ozakboy.TradeKit.Abstractions 0.1.1 遞移帶的是 0.2.0,
+    不明寫會讓還原挑到舊版,而本套件用得到 0.3.0 才有的 API。
+    Dependency policy: only the .NET BCL, first-party Microsoft packages, and Ozakboy.* packages, judged by the
+    transitive graph rather than by package name — which is the whole reason this package exists instead of a
+    community Binance client. Ozakboy.Core.Abstractions is pinned explicitly because TradeKit.Abstractions 0.1.1
+    transitively carries 0.2.0.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Ozakboy.TradeKit.Abstractions" Version="0.1.1" />
+    <PackageReference Include="Ozakboy.Http" Version="0.2.0" />
+    <PackageReference Include="Ozakboy.Core.Abstractions" Version="0.3.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.12" />
+  </ItemGroup>
+
+  <!--
+    刻意不引用 Microsoft.SourceLink.GitHub 套件,與其他 Ozakboy.* 套件一致。
+    自 .NET 8 起 SourceLink 已內建於 SDK,設定 PublishRepositoryUrl 與 EmbedUntrackedSources
+    (見 Directory.Build.props)即可;外掛套件反而會帶進有安全通報的相依,
+    在 TreatWarningsAsErrors 之下讓「還原」階段就直接失敗。
+  -->
+
+</Project>

@@ -1,0 +1,200 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1789008009026,
+  "futuresType": "U_MARGINED",
+  "rateLimits": [
+    {
+      "rateLimitType": "REQUEST_WEIGHT",
+      "interval": "MINUTE",
+      "intervalNum": 1,
+      "limit": 6000
+    },
+    {
+      "rateLimitType": "ORDERS",
+      "interval": "MINUTE",
+      "intervalNum": 1,
+      "limit": 1200
+    },
+    {
+      "rateLimitType": "ORDERS",
+      "interval": "SECOND",
+      "intervalNum": 10,
+      "limit": 300
+    }
+  ],
+  "exchangeFilters": [],
+  "assets": [
+    {
+      "asset": "USDT",
+      "marginAvailable": true,
+      "autoAssetExchange": "-100"
+    }
+  ],
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "pair": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "deliveryDate": 4133404802000,
+      "onboardDate": 1569398400000,
+      "status": "TRADING",
+      "maintMarginPercent": "2.5000",
+      "requiredMarginPercent": "5.0000",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "marginAsset": "USDT",
+      "pricePrecision": 2,
+      "quantityPrecision": 4,
+      "baseAssetPrecision": 8,
+      "quotePrecision": 8,
+      "underlyingType": "COIN",
+      "underlyingSubType": [],
+      "triggerProtect": "0.0500",
+      "liquidationFee": "0.020000",
+      "marketTakeBound": "0.30",
+      "maxMoveOrderLimit": 1000,
+      "filters": [
+        {
+          "minPrice": "261.10",
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.10",
+          "maxPrice": "809484"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "minQty": "0.0001",
+          "maxQty": "1000",
+          "stepSize": "0.0001"
+        },
+        {
+          "filterType": "MARKET_LOT_SIZE",
+          "maxQty": "120",
+          "stepSize": "0.0001",
+          "minQty": "0.0001"
+        },
+        {
+          "filterType": "MAX_NUM_ORDERS",
+          "limit": 10000
+        },
+        {
+          "filterType": "MIN_NOTIONAL",
+          "notional": "50"
+        },
+        {
+          "multiplierDown": "0.9500",
+          "multiplierDecimal": "4",
+          "multiplierUp": "1.0500",
+          "filterType": "PERCENT_PRICE"
+        },
+        {
+          "positionControlSide": "NONE",
+          "filterType": "POSITION_RISK_CONTROL"
+        }
+      ],
+      "orderTypes": [
+        "LIMIT",
+        "MARKET",
+        "STOP",
+        "STOP_MARKET",
+        "TAKE_PROFIT",
+        "TAKE_PROFIT_MARKET",
+        "TRAILING_STOP_MARKET"
+      ],
+      "timeInForce": [
+        "GTC",
+        "IOC",
+        "FOK",
+        "GTX",
+        "GTD"
+      ],
+      "permissionSets": [
+        "GRID",
+        "COPY",
+        "RPI"
+      ]
+    },
+    {
+      "symbol": "ELSAUSDT",
+      "pair": "ELSAUSDT",
+      "contractType": "PERPETUAL",
+      "deliveryDate": 4133404800000,
+      "onboardDate": 1769066700000,
+      "status": "PENDING_TRADING",
+      "maintMarginPercent": "2.5000",
+      "requiredMarginPercent": "5.0000",
+      "baseAsset": "ELSA",
+      "quoteAsset": "USDT",
+      "marginAsset": "USDT",
+      "pricePrecision": 0,
+      "quantityPrecision": 7,
+      "baseAssetPrecision": 8,
+      "quotePrecision": 8,
+      "underlyingType": "COIN",
+      "underlyingSubType": [],
+      "triggerProtect": "0.1500",
+      "liquidationFee": "0.020000",
+      "marketTakeBound": "0.15",
+      "maxMoveOrderLimit": 10000,
+      "filters": [
+        {
+          "tickSize": "0",
+          "maxPrice": "200",
+          "minPrice": "0",
+          "filterType": "PRICE_FILTER"
+        },
+        {
+          "minQty": "1",
+          "filterType": "LOT_SIZE",
+          "stepSize": "1",
+          "maxQty": "3500000"
+        },
+        {
+          "maxQty": "350000",
+          "filterType": "MARKET_LOT_SIZE",
+          "stepSize": "1",
+          "minQty": "1"
+        },
+        {
+          "limit": 200,
+          "filterType": "MAX_NUM_ORDERS"
+        },
+        {
+          "filterType": "MIN_NOTIONAL",
+          "notional": "5"
+        },
+        {
+          "multiplierUp": "1.1500",
+          "filterType": "PERCENT_PRICE",
+          "multiplierDown": "0.8500",
+          "multiplierDecimal": "4"
+        },
+        {
+          "positionControlSide": "NONE",
+          "filterType": "POSITION_RISK_CONTROL"
+        }
+      ],
+      "orderTypes": [
+        "LIMIT",
+        "MARKET",
+        "STOP",
+        "STOP_MARKET",
+        "TAKE_PROFIT",
+        "TAKE_PROFIT_MARKET",
+        "TRAILING_STOP_MARKET"
+      ],
+      "timeInForce": [
+        "GTC",
+        "IOC",
+        "FOK",
+        "GTX",
+        "GTD"
+      ],
+      "permissionSets": [
+        "GRID",
+        "COPY",
+        "DCA",
+        "PSB"
+      ]
+    }
+  ]
+}
