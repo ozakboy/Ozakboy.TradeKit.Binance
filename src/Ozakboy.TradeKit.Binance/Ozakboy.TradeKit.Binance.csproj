@@ -39,15 +39,16 @@
   <!--
     相依政策:只允許 .NET BCL、Microsoft 官方套件與 Ozakboy.* 自研套件,判定看「遞移相依」而非套件名稱。
     這正是本套件存在的理由 —— 幣安的第三方社群套件(Binance.Net 等)一律不使用。
-    Ozakboy.Core.Abstractions 明確指定 0.3.0:Ozakboy.TradeKit.Abstractions 0.1.1 遞移帶的是 0.2.0,
-    不明寫會讓還原挑到舊版,而本套件用得到 0.3.0 才有的 API。
+    Ozakboy.Core.Abstractions 仍然明確指定 0.3.0。TradeKit.Abstractions 0.2.0 起遞移帶的已經就是 0.3.0,
+    但明寫的成本是一行、拿掉的代價是下次上游降版時無聲還原到舊版,所以留著。
     Dependency policy: only the .NET BCL, first-party Microsoft packages, and Ozakboy.* packages, judged by the
     transitive graph rather than by package name — which is the whole reason this package exists instead of a
-    community Binance client. Ozakboy.Core.Abstractions is pinned explicitly because TradeKit.Abstractions 0.1.1
-    transitively carries 0.2.0.
+    community Binance client. Ozakboy.Core.Abstractions stays pinned even though TradeKit.Abstractions 0.2.0
+    already carries 0.3.0 transitively: the pin costs one line and removing it would let a future upstream
+    downgrade restore an older version in silence.
   -->
   <ItemGroup>
-    <PackageReference Include="Ozakboy.TradeKit.Abstractions" Version="0.1.1" />
+    <PackageReference Include="Ozakboy.TradeKit.Abstractions" Version="0.2.0" />
     <PackageReference Include="Ozakboy.Http" Version="0.2.0" />
     <PackageReference Include="Ozakboy.Core.Abstractions" Version="0.3.0" />
     <!--
@@ -59,7 +60,7 @@
       only Microsoft.Extensions.Logging.Abstractions and the same Ozakboy.Core.Abstractions 0.3.0 pinned above,
       so the transitive graph still contains no community package.
     -->
-    <PackageReference Include="Ozakboy.WebSockets" Version="0.2.0" />
+    <PackageReference Include="Ozakboy.WebSockets" Version="0.2.1" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.12" />
   </ItemGroup>
