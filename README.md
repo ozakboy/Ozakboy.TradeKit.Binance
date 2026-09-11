@@ -318,6 +318,10 @@ and additionally pinned to `RetryPolicy.NoRetry`. The two guards are deliberate 
 `Ozakboy.Http` retry handler, and the policy stops whoever swaps the default for a predicate that retries
 everything.
 
+Every retry is a new request: it waits for its own rate-limit permit, pays its own weight, and is signed afresh
+with the current `timestamp`, so a retry after a long backoff is not rejected with `-1021`. A local rate-limit
+timeout — the permit never came within `RateLimitAcquisitionTimeout` — is not retried.
+
 Everything else is idempotent and retries safely:
 
 | Operation | Retryable | Why |
@@ -493,6 +497,9 @@ dotnet test --filter "TestCategory=MainnetPublic"                          # pro
   every heartbeat reply) are never quoted, and heartbeat replies are recognised and dropped without being read.
 - Credentials are injected by the host and carried by `Ozakboy.Http`'s `SigningOptions`; this package reads
   them only at the moment of signing.
+- The API key and secret are registered with the client's masker, so an error returned by the REST client —
+  its message, every `Error.Data` entry, and the exception text — never carries them, even when the exchange
+  or a transport exception echoes them back.
 
 ## Licence
 

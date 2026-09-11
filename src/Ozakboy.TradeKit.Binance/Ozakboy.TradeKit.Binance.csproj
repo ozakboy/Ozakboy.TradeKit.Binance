@@ -11,7 +11,7 @@
 
     <PackageProjectUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</RepositoryUrl>
-    <PackageReleaseNotes>0.1.1 — Adapts to Binance's futures WebSocket route split. Market streams now dial /market/stream: the unprefixed /stream, retired on 2026-04-23, connects on production but delivers no data, which is why 0.1.0 received nothing there (it was not a local network problem). The user data stream now dials /private/ws?listenKey=…&amp;events=… with an explicit event list, because the 0.1.0 /ws/&lt;listenKey&gt; no longer delivers events on the testnet. A new production public-market test verifies the fix. Full notes: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/blob/main/CHANGELOG.md</PackageReleaseNotes>
+    <PackageReleaseNotes>0.1.2 — Moves to Ozakboy.Http 0.3.0, whose pipeline now runs retry, then rate limiting, then signing, then logging. Every retry waits for its own rate-limit permit, pays its own weight, and is signed afresh, and the Binance timestamp parameter is restamped with the current time on each attempt, so a retry after a long backoff is no longer rejected with -1021 (0.1.1 re-sent the first attempt's timestamp and signature). The HttpPipelineClient is now created with CreateOzakboyHttpPipelineClient, so every error the REST client returns is masked against the registered API key and secret. Behaviour inherited from Ozakboy.Http 0.3.0: a local rate-limit timeout is not retried, and Error.Exception is a SanitizedException rather than the original exception. No public API changes. Full notes: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/blob/main/CHANGELOG.md</PackageReleaseNotes>
 
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
@@ -50,7 +50,7 @@
   -->
   <ItemGroup>
     <PackageReference Include="Ozakboy.TradeKit.Abstractions" Version="0.3.0" />
-    <PackageReference Include="Ozakboy.Http" Version="0.2.0" />
+    <PackageReference Include="Ozakboy.Http" Version="0.3.0" />
     <PackageReference Include="Ozakboy.Core.Abstractions" Version="0.3.0" />
     <!--
       行情串流的連線管理(重連、重連後重放訂閱、閒置逾時存活偵測、有界佇列背壓)一律用這個套件,

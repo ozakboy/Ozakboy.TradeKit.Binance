@@ -8,6 +8,65 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-09-12
+
+改用 `Ozakboy.Http` 0.3.0。重試的每一次嘗試都各自排隊等限流許可、各自付權重,並在拿到許可之後以當下時間重新簽章;
+REST 用戶端回傳的每一個錯誤都以已登記的 API 金鑰與密鑰做字面遮罩。公開 API 沒有變更,升級不需要改呼叫端程式碼。
+Moves to `Ozakboy.Http` 0.3.0. Every retry attempt now queues for its own rate-limit permit, pays its own weight, and
+is re-signed with the current time once the permit is held; every error the REST client returns is masked against
+the registered API key and secret. No public API changes, so upgrading needs no caller changes.
+
+### 問題修正 / Fixed
+
+- **重試沿用第一次的時間戳 / Retries reused the first attempt's timestamp**:0.1.1 相依的 `Ozakboy.Http` 0.2.0
+  實際的管線順序是「簽章 → 限流 → 重試」,重試在簽章之內,每次重試送出的都是第一次嘗試的簽章與 `timestamp`。
+  退避加上排隊一久超過 `recvWindow`(預設 5 秒),重試本身就被幣安以 `-1021` 拒絕,而 `-1021` 對映成非暫時性的
+  `TimestampOutOfSync`,上層只會看到一次莫名其妙的時鐘偏移。0.3.0 改為「重試 → 限流 → 簽章 → 日誌」;
+  本版再把 `SigningOptions.TimestampParameterName` 設為 `timestamp`(在 `BinanceOptions.CreateSigningOptions`
+  設定,`AddBinanceFutures` 註冊時一併複製),簽章處理器每一次嘗試都把它在原位換成當下時間再簽,待簽字串的參數順序不變。
+  With `Ozakboy.Http` 0.2.0 retry sat inside signing, so a retry re-sent the first attempt's signature and timestamp
+  and, after a long enough backoff, was rejected with the non-transient `-1021`. The 0.3.0 order plus
+  `TimestampParameterName = "timestamp"` restamps it in place on every attempt.
+
+- **重試不付權重 / Retries paid no rate-limit weight**:同一個順序問題,限流在重試之外只被穿過一次,重試 N 次本地配額只扣一份,
+  錯誤率高時低估實際用量。現在每次嘗試各付一份權重。
+  Under the 0.2.0 order N retries paid for one; every attempt now pays its own weight.
+
+- **錯誤裡的金鑰沒有被遮罩 / Credentials in errors were not masked**:0.1.1 手動建立 `HttpPipelineClient`,
+  而 `Ozakboy.Http` 0.2.0 的門面對錯誤不做已登記祕密的字面替換。交易所把金鑰 echo 回錯誤本文、或傳輸層例外訊息帶到金鑰時,
+  它會原樣出現在 `Error.Message` 與 `Error.Data`。門面改由 `provider.CreateOzakboyHttpPipelineClient(BinanceConstants.HttpClientName)`
+  建立,自動帶入這個具名用戶端的遮罩器(API 金鑰與密鑰由 `AddOzakboyHttpPipeline` 登記)與管線同一份逾時設定。
+  The facade is now built with `CreateOzakboyHttpPipelineClient`, which brings in the client's masker, so an echoed or
+  exception-borne key no longer reaches `Error.Message` or `Error.Data`.
+
+### 技術改進 / Changed
+
+- **相依 / Dependencies**:`Ozakboy.Http` 0.2.0 → 0.3.0。`dotnet list package --include-transitive` 仍只有
+  Microsoft.\*、System.\* 與 Ozakboy.\*。
+  The transitive graph still contains only Microsoft.\*, System.\*, and Ozakboy.\* packages.
+
+- **繼承自 `Ozakboy.Http` 0.3.0 的行為變更 / Behaviour inherited from `Ozakboy.Http` 0.3.0**:
+  本地限流逾時(`RateLimitAcquisitionTimeout` 內拿不到許可)預設不重試,對映後仍是 `TradeErrorCodes.RateLimited`;
+  單次嘗試逾時不再計入排隊等許可的時間,整體逾時仍涵蓋;`Error.Exception` 一律是 `SanitizedException`
+  (原型別名在 `OriginalExceptionType`),請改以 `Error.Code` / `Error.Category` 分支;
+  具名用戶端不再有 `IHttpClientFactory` 的預設日誌,`HttpClient.Timeout` 為無限,整趟逾時由 `Timeouts.OverallTimeout` 負責。
+  A local rate-limit timeout is not retried; the attempt timeout excludes queueing; `Error.Exception` is a
+  `SanitizedException`; the named client has no default factory logging and an infinite `HttpClient.Timeout`.
+
+- **測試管線跟上新順序 / The test pipeline follows the new order**:測試用的 `TestPipeline` 原本照 0.2.0 的實際順序
+  組成「簽章 → 限流 → 重試」,改為「重試 → 限流 → 簽章」,簽章處理器改用注入的假時鐘。
+  `TestPipeline` now assembles retry, rate limiting, signing, with the signing handler on the injected clock.
+
+- **新測試 / New tests**:`BinanceHttpPipelineRegistrationTests` 以 `AddBinanceFutures` 的正式註冊為對象,只換掉最內層傳輸:
+  重試時第二次嘗試的 `timestamp` 是當下時間、參數順序不變、簽章可用同一把密鑰重算驗證;交易所 echo 回金鑰與傳輸例外帶到金鑰兩種情境,
+  `Error.Message`、`Error.Data` 與例外文字都不含金鑰。兩條都以故意失敗驗證過:拿掉複製 `TimestampParameterName` 那一行,
+  時間戳測試變紅(第二次嘗試帶的是 7 秒前的時間戳);門面改回手動建立,兩條遮罩測試都變紅(金鑰原樣出現在 `Error.Message`)。
+  單元測試 736 個全綠,Release 建置 0 警告;2026-09-12 帶 Testnet 憑證依 CI 篩選(`TestCategory!=MainnetPublic`)
+  跑 756 個全綠、無略過,主網公開行情測試(`TestCategory=MainnetPublic`,不帶憑證)1 個通過。
+  Tests against the real registration cover the restamped retry and key masking; both were verified by breaking
+  them on purpose. 736 unit tests pass and the Release build has no warnings; with Testnet credentials the CI filter
+  ran 756 tests, all green with none skipped, and the production public market test passed.
+
 ## [0.1.1] - 2026-09-12
 
 修正幣安合約 WebSocket 路由拆分造成的不相容:主網行情收不到任何資料,Testnet 的使用者資料串流收不到事件。

@@ -90,10 +90,14 @@ public static class BinanceServiceCollectionExtensions
                 CopyLogging(options, pipeline);
             });
 
-        services.AddSingleton(provider => new HttpPipelineClient(
-            provider.GetRequiredService<IHttpClientFactory>().CreateClient(BinanceConstants.HttpClientName),
-            options.Timeouts,
-            provider.GetService<TimeProvider>()));
+        // 門面交給 Ozakboy.Http 從註冊處建立:它帶入這個具名用戶端的遮罩器(API 金鑰與密鑰已在
+        // AddOzakboyHttpPipeline 登記)、管線同一份逾時設定與容器裡的時間來源。門面是錯誤離開管線前的最後一道遮罩,
+        // 手動 new 時漏傳遮罩器不會有任何錯誤,那一道只是默默地只認得 SecretMasker.Default 上的祕密。
+        // The facade is built by Ozakboy.Http from the registration, which brings in this client's masker (the API
+        // key and secret were registered by AddOzakboyHttpPipeline), the pipeline's own timeouts, and the
+        // container's time source. The facade is the last masking an error passes on its way out; built by hand
+        // without the masker it raises no error and quietly knows only the secrets on SecretMasker.Default.
+        services.AddSingleton(provider => provider.CreateOzakboyHttpPipelineClient(BinanceConstants.HttpClientName));
 
         services.AddSingleton(provider => new BinanceExchangeInfoProvider(
             provider.GetRequiredService<HttpPipelineClient>(),
@@ -129,6 +133,13 @@ public static class BinanceServiceCollectionExtensions
         pipeline.Signing.SendApiKeyHeader = signing.SendApiKeyHeader;
         pipeline.Signing.Placement = signing.Placement;
         pipeline.Signing.Algorithm = signing.Algorithm;
+
+        // 漏掉這一行不會有任何錯誤:重試照樣重新簽章,簽的卻是第一次嘗試的舊時間戳,
+        // 退避一久就被幣安以 -1021 拒絕。理由見 BinanceOptions.CreateSigningOptions。
+        // Dropping this line raises no error: retries are still re-signed, but over the first attempt's
+        // timestamp, and after a long backoff Binance rejects them with -1021. See
+        // BinanceOptions.CreateSigningOptions for why.
+        pipeline.Signing.TimestampParameterName = signing.TimestampParameterName;
     }
 
     private static void CopyRateLimiting(BinanceOptions options, HttpPipelineOptions pipeline)

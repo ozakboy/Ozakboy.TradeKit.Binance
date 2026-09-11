@@ -216,6 +216,13 @@ internal sealed class BinanceApiClient
 
         var builder = query ?? QueryParameters.CreateBuilder();
 
+        // 這裡的時間戳決定的是參數的「位置」(待簽字串的順序)。真正送出的值由簽章處理器在每一次嘗試、
+        // 拿到限流許可之後於原位換成當下時間(見 BinanceOptions.CreateSigningOptions),
+        // 所以重試與排隊都不會讓它過期。
+        // The timestamp here fixes the parameter's position in the signed string. The value actually sent
+        // is replaced in place with the current time by the signing handler on every attempt, after the
+        // rate-limit permit is held (see BinanceOptions.CreateSigningOptions), so neither retries nor queueing
+        // let it go stale.
         builder
             .Add(BinanceConstants.RecvWindowParameterName, (long)_options.RecvWindow.TotalMilliseconds)
             .Add(BinanceConstants.TimestampParameterName, _timeProvider.GetUtcNow().ToUnixTimeMilliseconds());

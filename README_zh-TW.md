@@ -291,6 +291,9 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 `RetryPolicy.NoRetry`。兩道防線是刻意的 —— 標記擋的是 `Ozakboy.Http` 的重試處理器,
 策略擋的是「有人把預設策略換成一個看什麼都重試的 predicate」。
 
+每一次重試都是一個新請求:各自排隊等限流許可、各自付權重,並以當下的 `timestamp` 重新簽章,
+退避再久也不會因為時間戳過期被以 `-1021` 拒絕。本地限流逾時(在 `RateLimitAcquisitionTimeout` 內拿不到許可)不會重試。
+
 其餘的都是冪等的,可以安全重試:
 
 | 操作 | 可否重試 | 理由 |
@@ -448,6 +451,8 @@ dotnet test --filter "TestCategory=MainnetPublic"                          # 主
   例外或串流識別字裡。帶著它的訊息(`listenKeyExpired` 與每一則心跳回覆)一律不轉述,
   心跳回覆一被認出來就直接丟棄,內容連讀都不讀。
 - 憑證由宿主注入、由 `Ozakboy.Http` 的 `SigningOptions` 承載,本套件只在簽章當下讀取。
+- API 金鑰與密鑰登記在這個用戶端的遮罩器上,REST 用戶端回傳的錯誤 —— 訊息、每一筆 `Error.Data`、例外文字 ——
+  都不會帶著它們,即使交易所或傳輸層例外把它們 echo 回來也一樣。
 
 ## 授權
 

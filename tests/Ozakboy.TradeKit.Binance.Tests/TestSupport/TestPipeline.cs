@@ -11,11 +11,21 @@ namespace Ozakboy.TradeKit.Binance.Tests.TestSupport;
 /// <see cref="StubHttpMessageHandler"/> at the innermost position.
 /// </summary>
 /// <remarks>
-/// 順序刻意與 <c>AddOzakboyHttpPipeline</c> 一致(簽章 → 限流 → 重試 → 內層),
-/// 否則測到的就不是實際會跑的那條路徑 —— 例如簽章若不是最外層,限流器看到的 URL 就還沒被改寫,
-/// 那種差異在測試裡看不出來,上線才會出問題。
-/// The order deliberately matches <c>AddOzakboyHttpPipeline</c> — signing, rate limiting, retry, inner —
-/// because otherwise the tests exercise a different path from the one that actually runs.
+/// <para>
+/// 順序刻意與 <c>Ozakboy.Http</c> 0.3.0 的 <c>AddOzakboyHttpPipeline</c> 一致(重試 → 限流 → 簽章 → 內層),
+/// 否則測到的就不是實際會跑的那條路徑 —— 例如重試若在簽章之外,每次重試都會沿用第一次的時間戳,
+/// 那種差異在測試裡看不出來,上線才會以 <c>-1021</c> 出現。
+/// The order deliberately matches <c>AddOzakboyHttpPipeline</c> in <c>Ozakboy.Http</c> 0.3.0 — retry, rate
+/// limiting, signing, inner — because otherwise the tests exercise a different path from the one that actually
+/// runs; with retry outside signing, for instance, every retry would reuse the first attempt's timestamp.
+/// </para>
+/// <para>
+/// 0.1.1 以前這裡是「簽章 → 限流 → 重試」,那是照著 <c>Ozakboy.Http</c> 0.2.0 的實際順序抄的;0.3.0 修正了那個順序,
+/// 這裡跟著改。簽章處理器拿的是注入的時鐘,時間戳的斷言才對得上假時鐘。
+/// Up to 0.1.1 this read "signing, rate limiting, retry", copied from the actual order in <c>Ozakboy.Http</c>
+/// 0.2.0; 0.3.0 corrected that order and this follows. The signing handler takes the injected clock so that
+/// timestamp assertions line up with the fake one.
+/// </para>
 /// </remarks>
 internal static class TestPipeline
 {
@@ -69,14 +79,14 @@ internal static class TestPipeline
         StubHttpMessageHandler stub,
         TimeProvider timeProvider)
     {
-        var retry = new RetryHandler(options.Retry, options.Timeouts, timeProvider) { InnerHandler = stub };
+        var signing = new SigningHandler(options.CreateSigningOptions(), timeProvider) { InnerHandler = stub };
         var rateLimiting = new RateLimitingHandler(options.CreateRateLimitOptions(), timeProvider)
         {
-            InnerHandler = retry,
+            InnerHandler = signing,
         };
-        var signing = new SigningHandler(options.CreateSigningOptions()) { InnerHandler = rateLimiting };
+        var retry = new RetryHandler(options.Retry, options.Timeouts, timeProvider) { InnerHandler = rateLimiting };
 
-        var http = new HttpClient(signing)
+        var http = new HttpClient(retry)
         {
             BaseAddress = options.ResolveEndpoints().RestBaseUri,
         };

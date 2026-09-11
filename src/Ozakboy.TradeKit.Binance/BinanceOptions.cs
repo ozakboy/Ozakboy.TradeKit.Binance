@@ -124,6 +124,17 @@ public sealed class BinanceOptions
     /// 等待限流額度的上限,預設 30 秒。
     /// How long to wait for rate-limit permits; 30 seconds by default.
     /// </summary>
+    /// <remarks>
+    /// 限流在重試之內,每一次嘗試各自排隊、各自付權重。排隊的時間不計入 <see cref="HttpTimeoutOptions.AttemptTimeout"/>
+    /// (那只量對方回應多久),但計入 <see cref="HttpTimeoutOptions.OverallTimeout"/>。等到這個上限仍拿不到額度時,
+    /// 預設重試策略<b>不會</b>重試(請求根本沒送出,重試只會把等待乘上嘗試次數),錯誤分類是
+    /// <see cref="ErrorCategory.RateLimited"/>。
+    /// Rate limiting sits inside retry, so every attempt queues and pays its own weight. Queueing time does not
+    /// count towards <see cref="HttpTimeoutOptions.AttemptTimeout"/>, which measures only how long the exchange
+    /// takes to answer, but does count towards <see cref="HttpTimeoutOptions.OverallTimeout"/>. When this ceiling
+    /// passes without a permit, the default retry policy does <b>not</b> retry — the request never went out, and a
+    /// retry would only multiply the wait — and the error is categorised <see cref="ErrorCategory.RateLimited"/>.
+    /// </remarks>
     public TimeSpan RateLimitAcquisitionTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
@@ -259,6 +270,17 @@ public sealed class BinanceOptions
     /// The algorithm is HMAC-SHA256 with lower-case hexadecimal output, supplied by <c>Ozakboy.Http</c> and
     /// already checked against the official golden vectors.
     /// </para>
+    /// <para>
+    /// <see cref="SigningOptions.TimestampParameterName"/> 設為 <c>timestamp</c>,簽章處理器每一次嘗試都會把它
+    /// 在原位換成當下時間再簽。少了這一行,重試仍會重新簽章,簽的卻是第一次嘗試組請求時的舊時間 ——
+    /// 退避加上排隊一久就超過 <see cref="RecvWindow"/>,重試本身被幣安以 <c>-1021</c> 拒絕,
+    /// 而 <c>-1021</c> 不是暫時性錯誤,上層只會看到一次莫名其妙的時鐘偏移。
+    /// <see cref="SigningOptions.TimestampParameterName"/> is set to <c>timestamp</c>, so the signing handler
+    /// replaces it in place with the current time on every attempt before signing. Without it a retry is still
+    /// re-signed, but over the time at which the first attempt was built; once backoff and queueing exceed
+    /// <see cref="RecvWindow"/> the retry itself is rejected with <c>-1021</c>, which is not transient, and the
+    /// caller sees an inexplicable clock drift.
+    /// </para>
     /// </remarks>
     public SigningOptions CreateSigningOptions() => new()
     {
@@ -268,6 +290,7 @@ public sealed class BinanceOptions
         SignatureParameterName = BinanceConstants.SignatureParameterName,
         SendApiKeyHeader = true,
         Placement = SignedPayloadPlacement.QueryString,
+        TimestampParameterName = BinanceConstants.TimestampParameterName,
     };
 
     /// <summary>
