@@ -8,15 +8,65 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
-## 未發布 / Unreleased
+## [0.1.0] - 2026-09-12
+
+首個發佈版本。幣安 USDⓈ-M 永續合約的完整用戶端:交易規則與帳戶查詢、下單撤單查單與槓桿／保證金模式、
+WebSocket 的 K 線與標記價,以及使用者資料串流(委託、成交、帳戶增量、保證金追繳、對帳訊號)。
+建構在 `Ozakboy.Http` 的簽章、限流、重試與脫敏日誌管線,以及 `Ozakboy.WebSockets` 的連線管理之上,
+不使用任何第三方社群套件。
+The first published release: a complete Binance USDⓈ-M futures client — trading rules and account queries,
+order placement, cancellation and lookup, leverage and margin mode, WebSocket klines and mark prices, and the user
+data stream — built on `Ozakboy.Http` and `Ozakboy.WebSockets` with no third-party dependencies.
 
 ### 新增功能 / Added
 
-- **交易端點 / Trading endpoints**:`BinanceFuturesClient` 改為實作完整的 `IExchangeClient`,
+- **環境與端點 / Environment and endpoints**:`BinanceEnvironment`、`BinanceEndpoints`。
+  REST 與 WebSocket 位址成套提供,沒有逐一設定的入口,「下單打 Testnet、行情接主網」在型別層面就組不出來。
+  REST and WebSocket bases always come as a matched set, so a mismatched pair cannot be expressed.
+
+- **設定 / Options**:`BinanceOptions`,含 `recvWindow`、交易規則快取有效期、每分鐘權重上限覆寫,
+  以及逾時、重試、日誌設定。不含任何預設憑證。
+  No default credentials ship with the package.
+
+- **交易規則 / Trading rules**:`BinanceExchangeInfoProvider` 實作 `IExchangeInfoProvider`,
+  內建每日更新的記憶體快取。快取綁在實例上、以環境為鍵,而且沒有任何公開 API 能把別的環境的快照交給它。
+  The daily in-memory cache is bound to the instance and keyed by environment, with no public API through which
+  another environment's snapshot could be supplied.
+
+- **規則對映 / Rule mapping**:`BinanceExchangeInfoParser` 把 `PRICE_FILTER`、`LOT_SIZE`、`MIN_NOTIONAL`、
+  `MARKET_LOT_SIZE` 對映成 `SymbolInfo`,數值一律以 `Precision.TryParsePlain` 解析(拒絕科學記號)。
+  缺欄位一律拒絕該商品並記進 `RejectedSymbols`,絕不以預設值猜測;全部商品都失敗時整份解析失敗。
+  A missing field rejects that symbol and is recorded rather than defaulted; every symbol failing fails the
+  whole parse.
+
+- **幣安專屬欄位 / Binance-specific fields**:`BinanceSymbolDetail` 保留 `MARKET_LOT_SIZE` 的數量上下限、
+  商品狀態、合約類型與宣告精度 —— 中立模型的 `MaxQuantity` 只有一個欄位,而市價與限價的上限幾乎必定不同。
+  The neutral model has one `MaxQuantity` while the market and limit ceilings almost always differ.
+
+- **帳戶查詢 / Account queries**:`BinanceFuturesClient` 提供 `GetAccountSnapshotAsync`、
+  `GetPositionsAsync`、`GetPositionAsync`。帳戶快照同時取用 `/fapi/v2/account` 與 `/fapi/v2/positionRisk`,
+  因為帳戶端點的持倉沒有 `markPrice`,少了它名目價值會是零。
+  The snapshot uses both endpoints because the account endpoint's positions carry no `markPrice`, without which
+  the notional comes out zero.
+
+- **錯誤對映 / Error mapping**:`BinanceErrorMapper`、`BinanceApiErrorCodes`、`BinanceErrorCodes`、
+  `BinanceErrorDataKeys`、`BinanceErrors`。涵蓋 10xx / 11xx / 20xx / 40xx 四個區段,
+  原始代碼與訊息一併留在 `Error.Data`。暫時性由 `ErrorCategory` 推得而非逐碼設定旗標。
+  Transience follows from the category rather than from a per-code flag.
+
+- **限流與權重 / Rate limiting and weights**:`BinanceRateLimits`、`BinanceRequestWeights`。
+  只設一個 `REQUEST_WEIGHT` 桶,兩個環境都採主網的每分鐘 2400。
+  A single `REQUEST_WEIGHT` bucket, at production's ceiling on both environments.
+
+- **相依性注入 / Dependency injection**:`AddBinanceFutures`,一次註冊具名 `HttpClient`、
+  `HttpPipelineClient`、交易規則來源與用戶端。
+  Registers the named client, the pipeline, the rule provider, and the futures client in one call.
+
+- **交易端點 / Trading endpoints**:`BinanceFuturesClient` 實作完整的 `IExchangeClient`,
   補齊 `PlaceOrderAsync`、`CancelOrderAsync`、`CancelAllOrdersAsync`、`GetOrderAsync`、
   `GetOpenOrdersAsync`、`SetLeverageAsync`、`SetMarginModeAsync`。
   `AddBinanceFutures` 另外以 `IExchangeClient` 介面註冊,讓策略層只相依介面。
-  The client now implements the whole of `IExchangeClient`, and the registration also binds the interface.
+  The client implements the whole of `IExchangeClient`, and the registration also binds the interface.
 
 - **下單絕不重試 / Orders are never retried**:`PlaceOrderAsync` 送出的請求同時以 `AsNonIdempotent()`
   標記並釘上 `RetryPolicy.NoRetry`。逾時不代表交易所沒收到,盲目重送開出來的是兩倍的部位。
@@ -96,26 +146,98 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   **分類原樣保留**,所以消費端用 `Error.IsTransient` 就能分辨「有缺口、還在重連」與
   「這條串流結束了」。原始的 `ws.*` 代碼留在 `Error.Data` 的 `innerCode` 裡。
 
+- **使用者資料串流 / User data stream**:新增 `BinanceUserDataFeed`,實作 `IUserDataFeed` 的五個訂閱方法 ——
+  `SubscribeOrderUpdatesAsync`、`SubscribeTradeUpdatesAsync`、`SubscribeAccountUpdatesAsync`、
+  `SubscribeMarginCallsAsync`、`SubscribeResyncSignalsAsync`。另有 `AddBinanceUserData()` 註冊擴充(單例),
+  與 `AddBinanceFutures` 分開:這條串流需要 API 憑證、會開長命連線、會在背景續期憑證,
+  只查公開資料的宿主不該被迫帶上這些。
+  A new feed implements all five `IUserDataFeed` subscriptions, registered by its own `AddBinanceUserData()`.
+
+- **一條連線、內部分流 / One connection, fanned out inside**:五個方法共用同一條 WebSocket 與同一把 listenKey,
+  背景讀取迴圈解析後分送。每個訂閱者一份有界佇列,同一種事件訂閱兩次,兩邊各拿到完整的一份;
+  含成交的 `ORDER_TRADE_UPDATE` 同時餵委託與成交兩條串流。帳戶同時只有一把 listenKey,
+  每個訂閱各開一條連線只會重複收同一份事件。
+  One socket and one listenKey serve every subscription; each subscriber has its own queue and sees every event.
+
+- **listenKey 生命週期 / listenKey lifecycle**:第一次訂閱才建立(`POST`),每 30 分鐘續期(`PUT`,
+  取 60 分鐘有效期的一半,容許連續失敗一次;驗證擋下達到有效期的週期),收到 `listenKeyExpired`
+  時自動重建憑證與連線並送出 `ResyncRequired { Reason = StreamCredentialExpired }`,
+  `DisposeAsync` 一律 `DELETE`。續期失敗會浮上串流 —— 那是憑證過期前唯一的預告。
+  Created lazily, renewed every 30 minutes, rebuilt on expiry with a resync signal, and always deleted on disposal.
+
+- **`StartAsync` 與正確的使用順序 / `StartAsync` and the order of operations**:新增公開的
+  `StartAsync`,**等握手完成才回傳**(內部用 `ConnectAsync` 而非背景的 `Start`)。
+  正確順序是**先訂閱 → `await StartAsync()` → 才下單**:訂閱之前與連線就緒之前的事件,交易所一律不補送。
+  Testnet 實測(同一支探針只差這一點):等連線就緒再下單,`ORDER_TRADE_UPDATE` 立刻到;
+  不等就下單,三十秒內一則都沒有,而 REST 查得到那張單確實掛在簿上。
+  Subscribe, await `StartAsync`, then act; placing an order before the socket is live loses its events for good.
+
+- **跟不上的訂閱者以失敗結束 / A subscriber that falls behind ends with a failure**:訂閱者佇列塞滿時
+  **不靜默丟棄**,而是讓那一條訂閱以 `trade.stream_disconnected`(`ErrorCategory.Exhausted`,
+  `IsTransient` 為 `false`)結束,訊息說明已漏事件、請重新訂閱並全量對帳。
+  `Channel` 的三種 Drop 模式的 `TryWrite` 一律回傳 `true`,所以佇列固定用 `Wait` 模式、以回傳值判斷溢位。
+  連線層佇列預設 `BackpressureStrategy.Wait`,與行情串流相反 —— 帳戶事件一則都丟不起。
+  Order events are never dropped in silence: an overflowing subscriber ends with a non-transient failure.
+
+- **斷線與對帳訊號 / Disconnects raise a resync signal**:斷線以暫時性失敗出現在每一條串流上,
+  連線回來之後送出 `ResyncRequired { Reason = Reconnected }`,`UntrustedSince` 取**第一次**斷線的時刻,
+  不會被重連期間的後續失敗覆寫。
+  A drop surfaces as a transient failure, and the return raises a resync signal dated from the first drop.
+
+- **閒置偵測預設開啟 / Idle detection is on by default**:比照行情串流,`BinanceUserDataStreamOptions`
+  新增 `KeepAliveInterval`(預設 30 秒),`IdleTimeout` 預設 90 秒,驗證規則相同(閒置逾時必須為正、
+  心跳必須短於閒置逾時)。心跳送 `{"method":"LIST_SUBSCRIPTIONS","id":N}`,`id` 遞增;
+  Testnet 實測在 `/ws/{listenKey}` 上 56–111 ms 內回覆。**回覆是 `{"result":["<listenKey>"],"id":N}`,
+  每一則都帶著憑證**,所以解析器看到「有 `id`、沒有 `e`」的物件就直接判為忽略,`result` 不讀也不轉述;
+  沒有 `id` 也沒有 `e` 的物件仍判失敗。閒置逾時觸發的斷線走一般的重連路徑(同一把憑證),
+  回來之後照樣送 `Reconnected`。
+  A `LIST_SUBSCRIPTIONS` heartbeat keeps a quiet account from being mistaken for a dead socket; its reply carries the
+  listenKey, so replies are recognised and dropped unread.
+
+- **帳戶增量改用 0.3.0 的專用型別 / Account deltas use the 0.3.0 delta types**:
+  `AccountUpdate.Positions` 的元素改為 `PositionChange`、`Balances` 改為 `BalanceChange`,
+  `MarginCall.Positions` 改為 `MarginCallPosition`。舊版用完整的 `Position` / `Balance`,
+  事件不帶的欄位只能填 0,而 `Position.Notional` 在帳戶變動裡恆為 0,風控讀到就是「沒有曝險」。
+  事件可能不帶的欄位(`cw`、`bc`、`cr`、`iw`、`mm`)缺席時為 `null` 而不是 0;全倉部位的
+  `IsolatedMargin` 為 `null`;`MARGIN_CALL` 缺標記價 `mp`、`ACCOUNT_UPDATE` 缺開倉均價 `ep` 一律判失敗。
+  The deltas now carry only what the events deliver, with absent optional fields as null rather than zero.
+
+- **串流憑證不外流 / The stream credential never escapes**:listenKey 不進任何錯誤訊息、`Error.Data`、
+  例外、串流識別字(診斷資料固定寫 `userDataStream`)或日誌;串流訊息原文一律不轉述
+  (`listenKeyExpired` 與心跳回覆本體都帶著憑證)。憑證端點的回應本體同樣不進錯誤 ——
+  實測 `PUT /fapi/v1/listenKey` 回的是**完整憑證**,不是文件說的空物件。`listenKey` 另外加進
+  `BinanceConstants.SensitiveParameterNames` 作為縱深防禦。以一條 canary 測試跑完整生命週期
+  (含心跳回覆、續期失敗、重建憑證)鎖住,並以故意失敗驗證過該測試確實會紅。
+  The listenKey reaches no error, log, or identifier, and a canary test covering the whole lifecycle guards it.
+
+- **多工串流上的未知事件忽略 / Unknown events on the multiplexed stream are ignored**:
+  `ACCOUNT_CONFIG_UPDATE` 等本套件不處理的事件型別不判失敗;但 `o.X` 對不上已知狀態、成交欄位讀不出來時
+  整則判失敗。委託類型取 `o.ot`(當初送出的類型),`FilledNotional` 以 `o.z × o.ap` 算出。
+  Unmodelled event types are ignored rather than failed, while an unmappable order status still fails the frame.
+
 ### 技術改進 / Changed
 
-- **測試 fixture 全面換成真實錄製 / Fixtures are now genuine recordings**:
-  上一版的 `account.json` 與 `positionRisk*.json` 是依官方文件手寫的,欄位名稱未經真實回應驗證。
-  本版以 2026-09-11 對 Testnet 的實際簽章請求重新錄製,並新增下單、查單、撤單、撤銷全部掛單、
-  改槓桿與三種錯誤回應的實錄。**驗證結果:手寫版的欄位名稱全部正確**,包含
-  `positionRisk` 的 `unRealizedProfit`(大寫 R)與 `account` 的 `unrealizedProfit`(小寫 r)。
-  實錄另外證實 `account` 的 `positions[]` 確實沒有 `markPrice` 與 `liquidationPrice`,
-  也就是帳戶快照多打一次 `positionRisk` 的理由。
-  The previously hand-written fixtures were replaced with live Testnet recordings, which confirmed that every
-  hand-written field name was correct.
+- **測試 fixture 是真實錄製 / Fixtures are genuine recordings**:REST 回應的合約測試用的是 2026-09-11
+  對 Testnet 實際簽章請求的錄製,涵蓋帳戶、持倉、下單、查單、撤單、撤銷全部掛單、改槓桿與三種錯誤回應。
+  實錄證實 `positionRisk` 的 `unRealizedProfit`(大寫 R)與 `account` 的 `unrealizedProfit`(小寫 r)
+  是兩種拼法,也證實 `account` 的 `positions[]` 沒有 `markPrice` 與 `liquidationPrice` ——
+  帳戶快照要多打一次 `positionRisk` 的理由。
+  REST contract tests run against live testnet recordings, which is how the two spellings of unrealised profit
+  were confirmed.
 
-- **整合測試真的會下單 / The integration tests really place orders**:
-  上一版因為沒有 Testnet 金鑰而全部 Inconclusive,本版實跑。測試單一律掛在標記價下方約 4% 且用 GTC
-  (不會成交)、一律在 `finally` 裡撤掉、一律帶 `pulsetrade-test-` 前綴,
-  並以一條測試加一段 `ClassCleanup` 查詢全部商品確認沒有殘留掛單。
+- **整合測試真的會下單 / The integration tests really place orders**:測試單一律掛在標記價下方約 4% 且用 GTC
+  (不會成交)、一律在 `finally` 裡撤掉、一律帶 `pulsetrade-test-` 前綴,並以一條測試加一段 `ClassCleanup`
+  查詢全部商品確認沒有殘留掛單。
+  Test orders rest far from the mark price, are always cancelled, and a class cleanup confirms none remain.
+
+- **相依 / Dependencies**:`Ozakboy.TradeKit.Abstractions` 0.3.0、`Ozakboy.Http` 0.2.0、
+  `Ozakboy.WebSockets` 0.2.1(連線日誌只寫 scheme 與主機 —— 使用者資料串流的路徑段就是 listenKey)、
+  `Ozakboy.Core.Abstractions` 0.3.0。遞移相依只有 `Microsoft.*`、`System.*` 與 `Ozakboy.*`。
+  The transitive graph contains only Microsoft, System, and Ozakboy packages.
 
 ### 已知限制 / Known limitations
 
-- **主網的行情串流尚未實際連線驗證**。M-1 探測與本階段的驗證都在 Testnet
+- **主網的行情串流尚未實際連線驗證**。M-1 探測與本版的驗證都在 Testnet
   (`wss://stream.binancefuture.com`)上進行;主網 `wss://fstream.binance.com` 在開發機上「連得上、
   收不到任何 frame」,以 Node 複驗結果相同,判定為本機網路環境問題而非程式問題,尚未排查完成。
   路徑格式在兩個環境上是同一套,但「同一套」這件事目前只有 Testnet 這一半是實測過的。
@@ -131,7 +253,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **條件單目前不被 `/fapi/v1/order` 受理**。2026-09-11 在 Testnet 實測,`STOP_MARKET` 與
   `TRAILING_STOP_MARKET` 都回 `-4120`,幣安要求改用 Algo Order 專用端點。
   參數對映已完成也有測試覆蓋,但端到端只驗到「被這個端點拒絕」;
-  真正要下條件單需要另外接 Algo Order 端點,不在本階段範圍。
+  真正要下條件單需要另外接 Algo Order 端點,不在本版範圍。
   Conditional order types are refused by this endpoint with `-4120`; the mapping is implemented and tested but
   end-to-end placement would need the Algo Order endpoints.
 
@@ -143,76 +265,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - **非零的未實現損益尚未經真實回應驗證**。錄製當時 Testnet 帳戶是空手的,欄位名稱已由實錄證實
   (抄錯會讓解析直接失敗),但「非零的值有被讀進模型」是以替換過數值的 fixture 驗的。
-  要真正驗證需要在 Testnet 開一個會成交的部位,而本階段的紀律是測試單一律不得成交。
+  要真正驗證需要在 Testnet 開一個會成交的部位,而本版的紀律是測試單一律不得成交。
 
 - **各交易端點的權重未以回應標頭實測覆核**。`x-mbx-used-weight-1m` 是一分鐘滾動窗的累計值,
   單次呼叫前後相減得不到穩定的差值,因此權重仍沿用官方文件。
 
-## [0.1.0] - 2026-09-11
+- **帳戶事件的單元測試樣本依官方文件組成,不是實錄**。`ACCOUNT_UPDATE` 與 `MARGIN_CALL` 只有在真的成交、
+  真的被追繳時才會出現,而本版的紀律是測試單不得成交;保證金追繳更無法在不逼近強平的情況下觸發。
+  欄位對映照文件寫對這件事由單元測試驗證,「文件本身說得對不對」目前只有委託事件
+  (`BinanceUserDataTestnetTests` 的真實連線與真實掛單)實際驗過。
+  The account-event samples are built from the documentation; only order events have been verified live.
 
-首個版本。幣安 USDⓈ-M 永續合約的交易規則、伺服器時間與唯讀帳戶查詢,建構在 `Ozakboy.Http` 的
-簽章、限流、重試與脫敏日誌管線之上。下單、撤單與 WebSocket 行情屬於下一階段,本版不含。
-The first release: Binance USDⓈ-M trading rules, server time, and read-only account queries, built on the
-signing, rate-limiting, retry, and log-masking pipeline of `Ozakboy.Http`. Order placement, cancellation, and
-WebSocket market data belong to the next stage and are not included.
-
-### 新增功能 / Added
-
-- **環境與端點 / Environment and endpoints**:`BinanceEnvironment`、`BinanceEndpoints`。
-  REST 與 WebSocket 位址成套提供,沒有逐一設定的入口,「下單打 Testnet、行情接主網」在型別層面就組不出來。
-  REST and WebSocket bases always come as a matched set, so a mismatched pair cannot be expressed.
-
-- **設定 / Options**:`BinanceOptions`,含 `recvWindow`、交易規則快取有效期、每分鐘權重上限覆寫,
-  以及逾時、重試、日誌設定。不含任何預設憑證。
-  No default credentials ship with the package.
-
-- **交易規則 / Trading rules**:`BinanceExchangeInfoProvider` 實作 `IExchangeInfoProvider`,
-  內建每日更新的記憶體快取。快取綁在實例上、以環境為鍵,而且沒有任何公開 API 能把別的環境的快照交給它。
-  The daily in-memory cache is bound to the instance and keyed by environment, with no public API through which
-  another environment's snapshot could be supplied.
-
-- **規則對映 / Rule mapping**:`BinanceExchangeInfoParser` 把 `PRICE_FILTER`、`LOT_SIZE`、`MIN_NOTIONAL`、
-  `MARKET_LOT_SIZE` 對映成 `SymbolInfo`,數值一律以 `Precision.TryParsePlain` 解析(拒絕科學記號)。
-  缺欄位一律拒絕該商品並記進 `RejectedSymbols`,絕不以預設值猜測;全部商品都失敗時整份解析失敗。
-  A missing field rejects that symbol and is recorded rather than defaulted; every symbol failing fails the
-  whole parse.
-
-- **幣安專屬欄位 / Binance-specific fields**:`BinanceSymbolDetail` 保留 `MARKET_LOT_SIZE` 的數量上下限、
-  商品狀態、合約類型與宣告精度 —— 中立模型的 `MaxQuantity` 只有一個欄位,而市價與限價的上限幾乎必定不同。
-  The neutral model has one `MaxQuantity` while the market and limit ceilings almost always differ.
-
-- **帳戶查詢 / Account queries**:`BinanceFuturesClient` 提供 `GetAccountSnapshotAsync`、
-  `GetPositionsAsync`、`GetPositionAsync`。帳戶快照同時取用 `/fapi/v2/account` 與 `/fapi/v2/positionRisk`,
-  因為帳戶端點的持倉沒有 `markPrice`,少了它名目價值會是零。
-  The snapshot uses both endpoints because the account endpoint's positions carry no `markPrice`, without which
-  the notional comes out zero.
-
-- **錯誤對映 / Error mapping**:`BinanceErrorMapper`、`BinanceApiErrorCodes`、`BinanceErrorCodes`、
-  `BinanceErrorDataKeys`、`BinanceErrors`。涵蓋 10xx / 11xx / 20xx / 40xx 四個區段,
-  原始代碼與訊息一併留在 `Error.Data`。暫時性由 `ErrorCategory` 推得而非逐碼設定旗標。
-  Transience follows from the category rather than from a per-code flag.
-
-- **限流與權重 / Rate limiting and weights**:`BinanceRateLimits`、`BinanceRequestWeights`。
-  只設一個 `REQUEST_WEIGHT` 桶,兩個環境都採主網的每分鐘 2400。
-  A single `REQUEST_WEIGHT` bucket, at production's ceiling on both environments.
-
-- **相依性注入 / Dependency injection**:`AddBinanceFutures`,一次註冊具名 `HttpClient`、
-  `HttpPipelineClient`、交易規則來源與用戶端。
-  Registers the named client, the pipeline, the rule provider, and the futures client in one call.
-
-### 已知限制 / Known limitations
+- **心跳被拒不會浮上串流**。指令回覆(含 `{"error":…,"id":N}`)一律判為忽略而不轉述,
+  因為無法保證它的內容不含連線片段。心跳被拒的後果只是那一次沒有刷新閒置計時,
+  持續被拒的話會由閒置逾時接手、以一般斷線重連的形式出現。
+  A rejected heartbeat is ignored rather than surfaced; if rejections persist the idle timeout takes over.
 
 - `SymbolInfo.MaxLeverage` 維持抽象層的預設 `1`。`exchangeInfo` 不含最大槓桿,它在需要簽章的
   `/fapi/v1/leverageBracket`;由 `requiredMarginPercent` 反推得到的是預設分層的槓桿而非上限,
   填進去等於用錯的值冒充事實。下一階段接上 `leverageBracket` 後補齊。
   `exchangeInfo` does not carry a leverage ceiling, and deriving one would pass a wrong number off as fact.
-
-- 帳戶與持倉的合約測試使用依官方文件手寫的回應,而非錄製的真實回應 —— 本階段沒有可用的 Testnet 金鑰。
-  欄位名稱因此未經真實回應驗證,取得憑證後應先跑 `[TestCategory("Testnet")]` 的整合測試並以實際回應取代。
-  Those fixtures are hand-written from the documentation, so their field names are unverified against a live
-  response.
-
-- WebSocket 主機取自官方文件,本版未實際連線驗證(本階段不實作串流)。
-  The WebSocket hosts come from the documentation and have not been dialled in this release.
 
 [0.1.0]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.0

@@ -23,7 +23,7 @@
 | 改槓桿與保證金模式 | 已完成 |
 | 條件單(停損、停利、移動停損)的參數對映 | 已完成,但端點已不受理(見下方) |
 | WebSocket 行情串流:K 線與標記價 | 完成 |
-| WebSocket 使用者資料串流 | 下一階段 |
+| WebSocket 使用者資料串流:委託、成交、帳戶增量、保證金追繳、對帳訊號 | 完成 |
 
 用戶端已實作完整的 `IExchangeClient`。所有價格、數量與金額都是 `decimal`,所有時間都是 UTC。
 
@@ -142,6 +142,67 @@ await foreach (var item in feed.SubscribeKlinesAsync(["BTCUSDT", "ETHUSDT"], Kli
 
 可調的參數在 `BinanceMarketStreamOptions`:心跳間隔、閒置逾時、重連次數上限、佇列容量與背壓策略,
 以及標記價要不要用每秒更新的串流。
+
+## 使用者資料串流
+
+`BinanceUserDataFeed` 實作 `IUserDataFeed`:帳戶私有串流上的委託更新、成交、帳戶增量、保證金追繳與對帳訊號。
+它需要 API 憑證,註冊是獨立的一個呼叫,接在 `AddBinanceFutures` 之後:
+
+```csharp
+services.AddBinanceFutures(options => { /* 環境與憑證,同上 */ });
+services.AddBinanceUserData();
+```
+
+**順序很重要:先訂閱,再 `await feed.StartAsync()`,最後才下單。** 訂閱之前、以及連線就緒之前發生的事件,
+交易所一律不補送;在那段空窗裡下的單,可能成交了串流卻一個字都不會說。
+
+```csharp
+var feed = provider.GetRequiredService<BinanceUserDataFeed>();
+
+// 1. 先訂閱。列舉一開始,訂閱者就同步登記完成。
+var orders = feed.SubscribeOrderUpdatesAsync(ct).GetAsyncEnumerator(ct);
+var firstOrder = orders.MoveNextAsync();
+
+// 2. 等連線真的就緒。
+var started = await feed.StartAsync(ct);
+
+if (started.IsFailure)
+{
+    logger.LogError("使用者資料串流沒有啟動:{Error}", started.Error);
+    return;
+}
+
+// 3. 這時才動作。從這裡開始的每一則事件都有人接。
+await client.PlaceOrderAsync(request, ct);
+```
+
+單純訂閱也會啟動串流,接下來要做的事如果本身不會產生事件,這樣就夠了;
+`StartAsync` 是給「接下來要做的事會產生事件」的那一刻用的。
+
+五個 `Subscribe` 方法共用**一條** WebSocket 與**一把** listenKey,每個訂閱者各有一份有界佇列,
+所以同一種事件訂閱兩次,兩邊都拿到完整的一份。串流替你處理的事:
+
+- **listenKey 全程代管。** 第一次訂閱時建立、每 30 分鐘續期、過期時自動重建、釋放時刪除。
+- **每一個缺口都會通知。** 重連或憑證過期都會在 `SubscribeResyncSignalsAsync` 送出 `ResyncRequired`。
+  缺口期間的事件交易所不補送,所以兩種都要做全量對帳。
+- **跟不上的訂閱者以失敗結束,不會靜默漏事件。** 那筆失敗的 `IsTransient` 為 `false`,
+  訊息會說明要重新訂閱並全量對帳。
+- **存活偵測用的是與行情串流相同的心跳。** 每 30 秒送一次 `LIST_SUBSCRIPTIONS`,閒置逾時 90 秒,
+  所以安靜的帳戶不會被當成死掉的連線,而真正死掉的連線會和一般斷線一樣重連。
+- **帳戶增量就是增量。** `AccountUpdate.Positions` 裝的是 `PositionChange`,`Balances` 裝的是
+  `BalanceChange`,兩者只含事件真的帶來的欄位,沒有標記價、名目價值或可用餘額。
+  要評估曝險,請查持倉,或乘上標記價串流的價格。
+
+`BinanceUserDataFeed` **只**實作 `IAsyncDisposable`:釋放時要刪除 listenKey,那是一次網路呼叫。
+泛型主機(Generic Host)本來就以非同步方式釋放,不必另外處理;自己建的容器則必須用 `await using` 釋放 ——
+對只實作非同步釋放的單例,容器同步的 `Dispose()` 會直接擲出例外:
+
+```csharp
+await using var provider = services.BuildServiceProvider();
+```
+
+可調的參數在 `BinanceUserDataStreamOptions`:心跳間隔與閒置逾時(驗證規則與行情串流相同)、
+listenKey 續期週期、重連次數上限,以及連線層與每個訂閱者的佇列容量。
 
 ## 幾個值得知道的設計決定
 
@@ -363,7 +424,10 @@ dotnet test --filter "TestCategory=Testnet"    # 行情不需金鑰,交易需要
 ## 安全
 
 - 套件不含任何預設憑證,也不會把憑證寫進檔案、日誌或 `ToString`。
-- `signature` 與 `X-MBX-APIKEY` 會自動加進日誌脫敏清單。
+- `signature`、`X-MBX-APIKEY` 與 `listenKey` 會自動加進日誌脫敏清單。
+- 使用者資料串流的 listenKey 能連上帳戶的私有資料,所以它不會出現在任何錯誤訊息、`Error.Data`、
+  例外或串流識別字裡。帶著它的訊息(`listenKeyExpired` 與每一則心跳回覆)一律不轉述,
+  心跳回覆一被認出來就直接丟棄,內容連讀都不讀。
 - 憑證由宿主注入、由 `Ozakboy.Http` 的 `SigningOptions` 承載,本套件只在簽章當下讀取。
 
 ## 授權

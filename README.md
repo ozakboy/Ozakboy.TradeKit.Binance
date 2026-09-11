@@ -23,7 +23,7 @@ package, or another `Ozakboy.*` package.
 | Leverage and margin mode | Done |
 | Conditional order parameter mapping (stop, take-profit, trailing) | Done, but the endpoint no longer accepts them — see below |
 | WebSocket market streams: klines and mark prices | Done |
-| WebSocket user data streams | Next stage |
+| WebSocket user data stream: orders, fills, account deltas, margin calls, resync signals | Done |
 
 The client implements the whole of `IExchangeClient`. Every price, quantity, and amount is a `decimal`, and
 every timestamp is UTC.
@@ -148,6 +148,74 @@ abbreviated field names.
 
 Tuning lives on `BinanceMarketStreamOptions`: the heartbeat interval, the idle timeout, the reconnect ceiling,
 the queue capacity and backpressure strategy, and whether mark prices use the one-second stream.
+
+## User data stream
+
+`BinanceUserDataFeed` implements `IUserDataFeed`: order updates, fills, account deltas, margin calls, and
+reconciliation signals from the account's private stream. It needs API credentials and is registered with its own
+call, after `AddBinanceFutures`:
+
+```csharp
+services.AddBinanceFutures(options => { /* environment and credentials, as above */ });
+services.AddBinanceUserData();
+```
+
+**The order of operations matters: subscribe first, then `await feed.StartAsync()`, and only then place
+orders.** Binance does not replay anything that happened before a subscription existed or before the connection
+was live, so an order placed in that window can fill without the stream ever reporting it.
+
+```csharp
+var feed = provider.GetRequiredService<BinanceUserDataFeed>();
+
+// 1. Subscribe. The subscriber is registered the moment enumeration begins, synchronously.
+var orders = feed.SubscribeOrderUpdatesAsync(ct).GetAsyncEnumerator(ct);
+var firstOrder = orders.MoveNextAsync();
+
+// 2. Wait until the connection is actually live.
+var started = await feed.StartAsync(ct);
+
+if (started.IsFailure)
+{
+    logger.LogError("User data stream did not start: {Error}", started.Error);
+    return;
+}
+
+// 3. Only now act. Every event from here on has somewhere to land.
+await client.PlaceOrderAsync(request, ct);
+```
+
+Subscribing alone also starts the stream, which is enough when nothing you do next produces events of its own.
+`StartAsync` exists for the moment something does.
+
+The five `Subscribe` methods share **one** WebSocket and **one** listenKey, and each subscriber gets its own
+bounded queue, so subscribing to the same event twice gives both subscriptions the complete set. What the feed
+does for you:
+
+- **The listenKey is managed end to end.** Created on the first subscription, renewed every 30 minutes, rebuilt
+  automatically when it expires, and deleted on disposal.
+- **Every gap is announced.** A reconnect or an expired credential raises a `ResyncRequired` on
+  `SubscribeResyncSignalsAsync`. The exchange replays nothing from the gap, so both call for a full
+  reconciliation.
+- **A subscriber that falls behind ends with a failure rather than losing events in silence.** The failure's
+  `IsTransient` is `false`, and its message says to resubscribe and reconcile in full.
+- **Liveness uses the same heartbeat as the market streams.** A `LIST_SUBSCRIPTIONS` goes out every 30 seconds
+  with a 90-second idle timeout, so a silent account is not mistaken for a dead socket, and a dead socket is
+  reconnected like any other drop.
+- **Account deltas are deltas.** `AccountUpdate.Positions` holds `PositionChange` and `Balances` holds
+  `BalanceChange`. Both carry only what the event delivers, with no mark price, notional, or available balance.
+  For exposure, query positions or multiply by the mark price stream.
+
+`BinanceUserDataFeed` implements **only** `IAsyncDisposable`: disposal deletes the listenKey, which is a network
+call. The generic host disposes asynchronously and needs nothing extra. A container you build yourself must be
+disposed with `await using`, because a synchronous `Dispose()` on it throws for an async-only singleton:
+
+```csharp
+await using var provider = services.BuildServiceProvider();
+```
+
+Tuning lives on `BinanceUserDataStreamOptions`: the heartbeat interval and idle timeout (validated by the same
+rules as the market streams), the listenKey renewal interval, the reconnect ceiling, and the connection and
+per-subscriber queue capacities.
 
 ## Design decisions worth knowing
 
@@ -395,7 +463,10 @@ dotnet test --filter "TestCategory=Testnet"    # market data needs no key; tradi
 ## Security
 
 - The package ships no default credentials and writes none to files, logs, or `ToString`.
-- `signature` and `X-MBX-APIKEY` are added to the log-masking list automatically.
+- `signature`, `X-MBX-APIKEY`, and `listenKey` are added to the log-masking list automatically.
+- The user data stream's listenKey reaches the account's private data, so it never appears in an error
+  message, `Error.Data`, an exception, or a stream identifier. Frames that carry it (`listenKeyExpired`, and
+  every heartbeat reply) are never quoted, and heartbeat replies are recognised and dropped without being read.
 - Credentials are injected by the host and carried by `Ozakboy.Http`'s `SigningOptions`; this package reads
   them only at the moment of signing.
 
