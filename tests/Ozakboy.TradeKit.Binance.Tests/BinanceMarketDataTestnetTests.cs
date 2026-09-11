@@ -31,6 +31,28 @@ public sealed class BinanceMarketDataTestnetTests
 
     private static readonly string[] BtcAndEth = ["BTCUSDT", "ETHUSDT"];
 
+    /// <summary>
+    /// 歷史 K 線查詢的嘗試次數。The number of attempts a historical kline query is given.
+    /// </summary>
+    private const int BoundaryRetries = 2;
+
+    /// <summary>
+    /// 「安全窗」的起點,以每分鐘的第幾秒表示。The start of the safe window, as an offset into the minute.
+    /// </summary>
+    /// <remarks>
+    /// 實測(2026-09-11,Testnet BTCUSDT):整分鐘翻過去之後,REST 的 <c>klines</c> 有好幾秒仍然只回到上一根,
+    /// 最久的一次過了 10.7 秒新的一根都還沒出現。20 秒是留了餘裕的下限。
+    /// Measured on the testnet BTCUSDT on 2026-09-11: for several seconds after a minute turns over, the REST
+    /// <c>klines</c> response still ends at the previous candle — in the worst round observed, the new one had
+    /// not appeared 10.7 seconds in. Twenty seconds is that bound with room to spare.
+    /// </remarks>
+    private static readonly TimeSpan SafeWindowStart = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// 「安全窗」的終點,之後就太靠近下一個邊界了。The end of the safe window, past which the next boundary is too close.
+    /// </summary>
+    private static readonly TimeSpan SafeWindowEnd = TimeSpan.FromSeconds(55);
+
     [TestMethod]
     [TestCategory("Testnet")]
     public async Task ReceivesKlinesFromTheTestnetStream()
@@ -176,6 +198,37 @@ public sealed class BinanceMarketDataTestnetTests
         Assert.HasCount(2, seen, "組合串流沒有同時送出兩個標的。");
     }
 
+    /// <summary>
+    /// 幣安回的最後一根是當前這根,還在跳動。把它當成已收盤就是把「查詢當下的最新價」
+    /// 寫成收盤價,存進歷史之後回測會用一根從未存在的 K 線。
+    /// The last candle Binance returns is the current one, still ticking. Treating it as closed records
+    /// "the latest price at query time" as a close, and a backtest later runs on a candle that never was.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 這條隨機失敗過一次。錯的不是判定,是「最後一根還開著」這個前提在分鐘邊界上不成立 ——
+    /// 而且理由比「請求跨過邊界」更硬:實測整分鐘翻過去之後,幣安有好幾秒仍然只回到上一根,
+    /// 那幾秒內查到的最後一根**真的已經收盤**,判它已收盤是對的。所以這裡不放寬斷言,改成把查詢
+    /// 排開邊界:先等進「安全窗」(每分鐘的第 20 到 55 秒)再查。
+    /// This failed once at random. The judgement was not wrong; the premise "the last candle is still open"
+    /// does not hold near a minute boundary — for a harder reason than a request straddling it: measurement
+    /// shows Binance keeps returning the previous candle for several seconds after the minute turns over, so
+    /// the last candle really has closed and calling it closed is right. The assertion therefore stays as
+    /// strict as it was, and the query is moved away from the boundary instead: it waits for the safe window,
+    /// seconds 20 through 55 of the minute.
+    /// </para>
+    /// <para>
+    /// 呼叫前後兩個時刻仍然記著,用來守住殘餘的競態:判定讀的是同一個本機時鐘,只要收盤時間晚於
+    /// 「回應到手」的時刻,套件就沒有任何理由判它已收盤,這個斷言不依賴任何關於幣安的假設。
+    /// 落在呼叫期間之內就是跨界,那一輪什麼也證明不了 —— 放寬斷言不行,這條擋的正是
+    /// 「整串都標成已收盤」那種退化。
+    /// The moments either side of the call are still recorded, to close the residual race: the judgement reads
+    /// the same local clock, so once the close time is later than the arrival moment nothing licenses calling
+    /// the candle closed, and that assertion rests on no assumption about Binance. A close time inside the
+    /// call is a straddle and proves nothing that round. Relaxing the assertion is not an option — what this
+    /// test guards against is precisely the degenerate "mark them all closed".
+    /// </para>
+    /// </remarks>
     [TestMethod]
     [TestCategory("Testnet")]
     public async Task FetchesHistoricalKlinesAndMarksTheLastOneAsStillOpen()
@@ -183,27 +236,90 @@ public sealed class BinanceMarketDataTestnetTests
         using var provider = Build();
         var feed = provider.GetRequiredService<IMarketDataFeed>();
 
-        var result = await feed.GetKlinesAsync(new KlineQuery
-        {
-            Symbol = "BTCUSDT",
-            Interval = KlineInterval.OneMinute,
-            Limit = 5,
-        });
+        var lastCloseTime = default(DateTimeOffset);
+        var lastAfter = default(DateTimeOffset);
 
-        Assert.IsTrue(result.TryGetValue(out var candles), result.Error?.Message);
-        Assert.HasCount(5, candles);
-
-        for (var index = 0; index < candles.Count - 1; index++)
+        for (var attempt = 1; attempt <= BoundaryRetries; attempt++)
         {
-            Assert.IsTrue(candles[index].IsClosed, $"第 {index} 根的收盤時間早已過去,應判為已收盤。");
-            Assert.IsGreaterThan(candles[index].OpenTime, candles[index + 1].OpenTime);
+            await Task.Delay(DelayIntoSafeWindow(DateTimeOffset.UtcNow, mustAdvance: attempt > 1));
+
+            var before = DateTimeOffset.UtcNow;
+
+            var result = await feed.GetKlinesAsync(new KlineQuery
+            {
+                Symbol = "BTCUSDT",
+                Interval = KlineInterval.OneMinute,
+                Limit = 5,
+            });
+
+            var after = DateTimeOffset.UtcNow;
+
+            Assert.IsTrue(result.TryGetValue(out var candles), result.Error?.Message);
+            Assert.HasCount(5, candles);
+
+            for (var index = 0; index < candles.Count - 1; index++)
+            {
+                Assert.IsTrue(candles[index].IsClosed, $"第 {index} 根的收盤時間早已過去,應判為已收盤。");
+                Assert.IsGreaterThan(candles[index].OpenTime, candles[index + 1].OpenTime);
+            }
+
+            var last = candles[^1];
+
+            lastCloseTime = last.CloseTime;
+            lastAfter = after;
+
+            // 收盤時間不晚於回應到手的時刻:這一根在呼叫期間(或更早)就收了,判已收盤或未收盤都說得通,
+            // 這一輪證明不了任何事。`before` 只用來讓訊息說得清楚是哪一種。
+            // The close time is no later than the arrival moment: this candle closed during the call, or
+            // before it, and either verdict is defensible, so the round proves nothing. `before` only serves
+            // to say which of the two it was.
+            if (last.CloseTime <= after)
+            {
+                Console.WriteLine(
+                    last.CloseTime < before
+                        ? $"第 {attempt} 輪:最後一根在請求送出前({before:O})就已於 {last.CloseTime:O} 收盤,重試。"
+                        : $"第 {attempt} 輪:最後一根於 {last.CloseTime:O} 收盤,正好落在這次呼叫期間,重試。");
+
+                continue;
+            }
+
+            // 收盤時間晚於回應到手的時刻,套件沒有任何理由判它已收盤。
+            // The close time is later than the arrival moment; nothing licenses calling it closed.
+            Assert.IsFalse(last.IsClosed, "最後一根還沒收盤,不可判為已收盤。");
+            return;
         }
 
-        // 幣安回的最後一根是當前這根,還在跳動。把它當成已收盤就是把「查詢當下的最新價」
-        // 寫成收盤價,存進歷史之後回測會用一根從未存在的 K 線。
-        // The last candle Binance returns is the current one, still ticking. Treating it as closed records
-        // "the latest price at query time" as a close, and a backtest later runs on a candle that never was.
-        Assert.IsFalse(candles[^1].IsClosed, "最後一根還沒收盤,不可判為已收盤。");
+        Assert.Inconclusive(
+            $"連續 {BoundaryRetries} 輪都拿不到還在跳動的最後一根(最後一次:收盤時間 {lastCloseTime:O}、"
+            + $"回應到手 {lastAfter:O})。每一輪都排在安全窗內,所以不是分鐘邊界;剩下的可能是本機時鐘偏快,"
+            + "或 Testnet 這段時間沒有成交。這不是套件的問題,但也表示這條這次沒有驗到東西。");
+    }
+
+    /// <summary>
+    /// 算出還要等多久才進得了「安全窗」,已經在窗內就是零。
+    /// The wait remaining before the safe window opens; zero when the moment is already inside it.
+    /// </summary>
+    /// <param name="now">當下時刻。The current moment.</param>
+    /// <param name="mustAdvance">
+    /// 為 <see langword="true"/> 時,即使已經在窗內也要前進到下一個窗 —— 重試若留在同一分鐘,
+    /// 拿到的會是同一根 K 線,等於沒重試。
+    /// When <see langword="true"/>, advance to the next window even from inside the current one: a retry that
+    /// stays in the same minute reads the same candle and so retries nothing.
+    /// </param>
+    /// <returns>要等待的時間。The delay to apply.</returns>
+    private static TimeSpan DelayIntoSafeWindow(DateTimeOffset now, bool mustAdvance)
+    {
+        var intoMinute = TimeSpan.FromTicks(now.UtcTicks % TimeSpan.TicksPerMinute);
+        var inWindow = intoMinute >= SafeWindowStart && intoMinute < SafeWindowEnd;
+
+        if (inWindow && !mustAdvance)
+        {
+            return TimeSpan.Zero;
+        }
+
+        return !inWindow && intoMinute < SafeWindowStart
+            ? SafeWindowStart - intoMinute
+            : TimeSpan.FromMinutes(1) - intoMinute + SafeWindowStart;
     }
 
     private static ServiceProvider Build()

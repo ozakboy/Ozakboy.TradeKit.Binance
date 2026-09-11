@@ -144,6 +144,23 @@ public sealed class BinanceMarketDataFeed : IMarketDataFeed
     /// <see langword="false"/>. Binance sends no such flag; it is derived here by comparing the close time
     /// against the current time.
     /// </para>
+    /// <para>
+    /// <b>整分鐘剛翻過去的那十幾秒不要查。</b>實測(2026-09-11,Testnet BTCUSDT,每 0.5 秒查一次):
+    /// 分鐘翻過去之後,回應有好幾秒仍然只回到上一根 —— 最久的一次過了 10.7 秒新的一根都還沒出現;
+    /// 而那期間<b>已經收盤的那一根還在長</b>,某一輪它的成交筆數在收盤後三秒從 102 變成 120。
+    /// 也就是說,收盤後立刻抓回來的那一根,量能與成交筆數是<b>少計</b>的,而價格四元組看起來完全正常。
+    /// 把它存進歷史,日後回測讀到的是一根價格對、量不對的 K 線。定時抓歷史請把排程挪開整分鐘,
+    /// 或改用串流:串流的 <c>x</c> 旗標是交易所自己說的收盤,沒有這個問題。
+    /// <b>Do not query in the first seconds after a minute turns over.</b> Measured on the testnet BTCUSDT on
+    /// 2026-09-11, polling twice a second: the response keeps ending at the previous candle for several
+    /// seconds — in the worst round observed the new one had not appeared 10.7 seconds in — and throughout
+    /// that time <b>the candle that has already closed is still growing</b>: in one round its trade count went
+    /// from 102 to 120 three seconds after its close. A candle fetched immediately after it closes therefore
+    /// <b>understates</b> volume and trade count while its four prices look entirely normal, and storing it
+    /// leaves history with a candle whose prices are right and whose size is not. Schedule historical pulls
+    /// away from the top of the minute, or take the stream instead: its <c>x</c> flag is the exchange's own
+    /// word for closed and carries none of this.
+    /// </para>
     /// </remarks>
     public async Task<Result<IReadOnlyList<Kline>>> GetKlinesAsync(
         KlineQuery query,
