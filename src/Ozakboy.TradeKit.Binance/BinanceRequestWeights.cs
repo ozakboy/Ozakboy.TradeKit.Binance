@@ -95,9 +95,15 @@ public static class BinanceRequestWeights
     /// </summary>
     /// <remarks>
     /// 官方 Trade REST API 頁面目前未標示這三個端點的權重,此處沿用歷史版本文件的 1。
-    /// 下一階段實作時應以回應標頭 <c>x-mbx-used-weight-1m</c> 的實測值覆核。
+    /// 2026-09-11 試過以回應標頭 <c>x-mbx-used-weight-1m</c> 實測覆核,但那個值是一分鐘滾動窗的<b>累計量</b>,
+    /// 兩次呼叫之間相減會因為窗口滾動而出現負值,得不到穩定的單次權重 —— 因此這個數字仍然只有文件依據。
+    /// 低估權重的代價是交易所端的 429 與後續封鎖,所以若要再調整,方向應該是往上而不是往下。
     /// The current Trade REST API page does not state a weight for these three; the value of 1 comes from older
-    /// revisions. The next stage should confirm it against the <c>x-mbx-used-weight-1m</c> header.
+    /// revisions. Verifying it against the <c>x-mbx-used-weight-1m</c> header was attempted on 2026-09-11 and
+    /// did not work: that header is a <b>running total</b> over a rolling minute, so subtracting consecutive
+    /// readings goes negative as the window rolls and yields no stable per-call figure. The number therefore
+    /// still rests on documentation alone. Under-declaring earns a 429 and the ban that follows, so any future
+    /// adjustment should move upwards rather than down.
     /// </remarks>
     public const int AccountSetting = 1;
 

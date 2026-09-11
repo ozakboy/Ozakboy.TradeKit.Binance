@@ -109,6 +109,12 @@ public static class BinanceServiceCollectionExtensions
             provider.GetRequiredService<BinanceExchangeInfoProvider>(),
             provider.GetService<TimeProvider>()));
 
+        // 以介面註冊,讓策略與風控只相依 IExchangeClient:回測時整個換成記憶體撮合器,
+        // 應用層一行都不必改。
+        // Registered by interface so that strategies and risk control depend on IExchangeClient alone; a
+        // backtest swaps in an in-memory matching engine without the application changing a line.
+        services.AddSingleton<IExchangeClient>(provider => provider.GetRequiredService<BinanceFuturesClient>());
+
         return services;
     }
 

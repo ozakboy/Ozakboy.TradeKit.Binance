@@ -21,7 +21,7 @@ public sealed class BinanceFuturesClientTests
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["/fapi/v2/account"] = Fixtures.Account,
-            ["/fapi/v2/positionRisk"] = Fixtures.PositionRisk,
+            ["/fapi/v2/positionRisk"] = Fixtures.PositionRiskOpen,
             ["/fapi/v1/exchangeInfo"] = Fixtures.ExchangeInfoMainnet,
             ["/fapi/v1/time"] = Fixtures.ServerTime,
         });
@@ -37,7 +37,7 @@ public sealed class BinanceFuturesClientTests
             var result = await client.GetAccountSnapshotAsync();
 
             Assert.IsTrue(result.TryGetValue(out var snapshot));
-            Assert.HasCount(2, snapshot.Balances);
+            Assert.HasCount(4, snapshot.Balances);
             Assert.HasCount(2, snapshot.Positions);
 
             // 兩個端點各打一次(帳戶 5 + 持倉 5,合計權重 10)。多花的那 5 點換到 markPrice 與
@@ -213,7 +213,7 @@ public sealed class BinanceFuturesClientTests
     {
         // 挑一邊回傳會讓平倉指令只平掉一半,另一半留在市場上 —— 比查不到部位危險得多。
         // Picking a side would flatten half the exposure and leave the rest live.
-        var (client, _, http) = Create(StubHttpMessageHandler.Json(Fixtures.PositionRiskHedge));
+        var (client, _, http) = Create(StubHttpMessageHandler.Json(Fixtures.PositionRiskHedgeOpen));
 
         using (client)
         using (http)

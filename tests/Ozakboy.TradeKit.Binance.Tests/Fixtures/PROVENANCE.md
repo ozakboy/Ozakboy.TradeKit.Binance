@@ -55,39 +55,108 @@ curl -s https://fapi.binance.com/fapi/v1/exchangeInfo -o exchangeInfo-mainnet.js
 
 ---
 
-## 依官方文件手寫 / Hand-written from the official documentation
+## 帳戶、持倉與委託:Testnet 實錄 / Recorded from the Testnet signed endpoints
 
-| 檔案 | 對應端點 |
-| --- | --- |
-| `account.json` | `GET /fapi/v2/account` |
-| `positionRisk.json` | `GET /fapi/v2/positionRisk`(單向模式) |
-| `positionRisk-hedge.json` | `GET /fapi/v2/positionRisk`(雙向模式,同一商品多空並存) |
+以下檔案是 **2026-09-11** 對 `https://testnet.binancefuture.com` 實際發出簽章請求後錄下的回應。
+每個保留下來的節點都是原樣複製,只挑選要留哪幾筆,不改任何欄位名稱與型別。
 
-**這三份不是錄製的。** 它們需要真實的 API 金鑰,而本階段沒有可用的 Testnet 金鑰,所以欄位名稱與型別
-取自幣安官方文件的回應範例(USDⓈ-M Futures,擷取日期 2026-09-11),數值是編造的。
+| 檔案 | 來源端點 | 環境 | 取得日期 (UTC) |
+| --- | --- | --- | --- |
+| `account.json` | `GET /fapi/v2/account` | Testnet | 2026-09-11 |
+| `positionRisk.json` | `GET /fapi/v2/positionRisk`(單向模式) | Testnet | 2026-09-11 |
+| `positionRisk-hedge.json` | `GET /fapi/v2/positionRisk`(雙向模式) | Testnet | 2026-09-11 |
+| `order-new.json` | `POST /fapi/v1/order`(LIMIT GTC) | Testnet | 2026-09-11 |
+| `order-query.json` | `GET /fapi/v1/order` | Testnet | 2026-09-11 |
+| `order-canceled.json` | `DELETE /fapi/v1/order` | Testnet | 2026-09-11 |
+| `openOrders.json` | `GET /fapi/v1/openOrders?symbol=BTCUSDT` | Testnet | 2026-09-11 |
+| `cancelAll.json` | `DELETE /fapi/v1/allOpenOrders` | Testnet | 2026-09-11 |
+| `leverage.json` | `POST /fapi/v1/leverage` | Testnet | 2026-09-11 |
+| `orderTypeNotSupported.json` | `POST /fapi/v1/order`(STOP_MARKET,遭拒) | Testnet | 2026-09-11 |
+| `marginTypeNoChange.json` | `POST /fapi/v1/marginType`(模式未變,遭拒) | Testnet | 2026-09-11 |
+| `orderNotFound.json` | `GET /fapi/v1/order`(不存在的編號) | Testnet | 2026-09-11 |
 
-這件事有實質風險,不要當成形式上的免責聲明:**欄位名稱沒有被真實回應驗證過**。特別是未實現損益在
-`positionRisk` 是大寫 R 的 `unRealizedProfit`、在 `account` 是小寫 r 的 `unrealizedProfit` ——
-抄錯不會讓解析失敗,只會讓那個欄位永遠讀到零。拿到 Testnet 金鑰後的第一件事,應該是跑
-`[TestCategory("Testnet")]` 的整合測試,把真實回應存下來取代這三份檔案。
+### 裁切內容 / What was trimmed
 
-數值全部是編造的,帳號、金鑰、識別碼一律不存在於任何檔案中。
+完整回應對一個 740 個商品的帳戶來說,`account` 約 281 KB、`positionRisk` 約 288 KB、雙向模式的
+`positionRisk` 約 576 KB(每個商品兩筆)。整份放進 repo 只會讓每次 diff 都不可讀,因此**只保留部分元素**:
+
+- `account.json`:頂層欄位原樣保留;`assets` 只留 `USDT`、`USDC`、`BTC`、`BNB`;
+  `positions` 只留 `BTCUSDT`、`ETHUSDT`、`DOGEUSDT`。每一筆都是原樣複製。
+- `positionRisk.json`:保留 `BTCUSDT`、`ETHUSDT`、`DOGEUSDT`、`XRPUSDT`、`1000PEPEUSDT`、`ADAUSDT`。
+- `positionRisk-hedge.json`:保留 `BTCUSDT` 與 `ETHUSDT` 的 `LONG`、`SHORT` 各一筆。
+- 委託相關的六份是單一請求的**完整回應**,一字未改。
+
+錄製當時的完整回應校驗值(UTF-8 位元組):
+
+| 來源 | 位元組 | SHA-256 |
+| --- | --- | --- |
+| `account`(Testnet) | 280,645 | `afdc929e9dd56b3e5e681d6bf8d1caab34dfa894705beeb78e88f365d495c132` |
+| `positionRisk`(Testnet,單向) | 287,905 | `8171d4e323453e4c437659b288330da4dc191ffe023ed30c4417f528703c357c` |
+| `positionRisk`(Testnet,雙向) | 576,549 | `c45c53b13722de38b7136879ee82c948e4ba08fd56d1e6bc88b259bac73f9a6a` |
+
+### 欄位名稱的驗證結果 / What the recording confirmed
+
+上一階段的手寫版本把未實現損益寫成 `positionRisk` 的 `unRealizedProfit`(大寫 R)與 `account` 的
+`unrealizedProfit`(小寫 r)。**實錄回應確認兩者都正確**,解析器讀得到的每一個欄位在真實回應裡都存在:
+`symbol`、`positionAmt`、`entryPrice`、`markPrice`、`unRealizedProfit`、`leverage`、`marginType`、
+`isolatedMargin`、`liquidationPrice`、`positionSide`、`updateTime`,以及 `account` 的 `asset`、
+`walletBalance`、`availableBalance`、`unrealizedProfit`、`canTrade`。
+
+實錄同時揭露了兩件手寫版看不出來的事:
+
+1. `positionRisk` 的真實回應另有 `isolated`(布林)與 `adlQuantile`(數值)兩個欄位,手寫版沒有。
+   兩者都不是解析器讀的欄位,多出來不影響,但手寫版確實不等於真實形狀。
+2. `account` 的 `positions[]` **沒有** `markPrice` 也沒有 `liquidationPrice`,欄位名也與 `positionRisk`
+   不同(`maxNotional` 對 `maxNotionalValue`、布林的 `isolated` 對字串的 `marginType`)。
+   這正是 `GetAccountSnapshotAsync` 多花 5 點權重另外打 `positionRisk` 的理由 —— 現在有實錄為證。
+
+### 為什麼還有 `-open` 兩份 / Why the two `-open` files exist
+
+`positionRisk-open.json` 與 `positionRisk-hedge-open.json` **不是**逐字實錄:它們的結構取自上面兩份實錄,
+數值被替換成「帳戶持有部位」的情境。
+
+原因是錄製當時 Testnet 帳戶是空手的,每一筆持倉的數量、損益、強平價都是零 ——
+那種 fixture 證明得了欄位名稱正確(欄位不在,解析就會失敗),卻證明不了
+「非零的損益有被讀出來」,而斷言 `UnrealizedPnl == 0` 是一句永遠成立的空話。
+
+因此兩種都留:實錄那兩份負責「形狀與欄位名是真的」,`-open` 這兩份負責「數值真的有被讀進模型」。
+替換過的欄位限於數值(`positionAmt`、`entryPrice`、`markPrice`、`unRealizedProfit`、`liquidationPrice`、
+`leverage`、`marginType`／`isolated`、`isolatedMargin`、`isolatedWallet`、`notional`、`updateTime`),
+欄位名稱與整體結構一字未動。
+
+**尚未驗證的部分要說清楚**:非零的未實現損益沒有經過真實回應驗證,因為那需要在 Testnet 開一個會成交的
+部位,而本階段的紀律是「測試單一律不得成交」。欄位名稱本身已由實錄證實,抄錯會讓解析直接失敗而不是讀到零。
+
+### 遮蔽 / Masking
+
+實錄的回應中不含任何帳號識別資訊:`account` 的頂層只有 `feeTier`、`tradeGroupId`(值為 -1)這類設定值,
+沒有帳號編號、使用者代號或金鑰;`positionRisk` 與委託回應同樣沒有。因此沒有欄位需要遮蔽,
+也沒有任何欄位被改動。委託回應中的 `orderId` 與 `clientOrderId` 是 Testnet 上一張已撤銷的測試單,
+不具敏感性。餘額數字是 Testnet 的模擬資金。
 
 ---
 
-## Recorded vs. hand-written (English summary)
+## Recorded from the live API (English summary)
 
-The three `exchangeInfo` and `time` files are genuine recordings of Binance's **public** endpoints, trimmed to
-a handful of symbols with every retained node copied verbatim — including the original ordering of each
-symbol's `filters` array, which differs between symbols within a single response and is what forces the parser
-to match on `filterType` rather than on index.
+Every fixture in this directory is now a genuine recording. The `exchangeInfo` and `time` files come from the
+public endpoints; the account, position, and order files were recorded on 2026-09-11 against
+`https://testnet.binancefuture.com` with real signed requests. Retained nodes are copied verbatim and only the
+selection of which rows to keep was edited, because the full responses run to hundreds of kilobytes.
 
-The `account.json` and `positionRisk*.json` files are **not** recordings. Those endpoints require real API
-credentials, which were not available for this stage, so their field names and types come from the official
-documentation's response examples (retrieved 2026-09-11) and their values are invented. The field names are
-therefore unverified against a live response — a real risk, not boilerplate, given that `unRealizedProfit`
-(capital R on `positionRisk`) and `unrealizedProfit` (lower-case r on `account`) fail silently as zero rather
-than as a parse error. The first thing to do once Testnet credentials exist is to run the
-`[TestCategory("Testnet")]` integration tests and replace these three files with what comes back.
+The recording settled the open question from the previous stage: the hand-written field names were **correct**,
+including `unRealizedProfit` with a capital R on `positionRisk` and `unrealizedProfit` with a lower-case r on
+`account`. It also showed two things the hand-written version could not: the real `positionRisk` rows carry
+extra `isolated` and `adlQuantile` fields, and the `positions[]` array inside `account` carries neither
+`markPrice` nor `liquidationPrice` — which is exactly why the snapshot spends five more weight on a separate
+`positionRisk` call.
 
-No account identifiers, keys, or secrets appear in any fixture.
+The two `-open` files are **not** verbatim recordings: they take the recorded structure and substitute values
+for an account that holds positions. The Testnet account was flat when recorded, so every quantity and P&L in
+the verbatim files is zero, and an assertion that a zero field reads zero proves nothing about whether a
+non-zero one is read at all. The verbatim files therefore carry the proof of shape and field names, and the
+`-open` files carry the proof that values reach the model. Only numeric values were substituted; no field name
+or structure was touched. A non-zero unrealised P&L remains unverified against a live response, because
+producing one means opening a position that fills, and the discipline for this stage is that no test order may
+fill.
+
+No account identifiers, keys, or secrets appear in any fixture; the responses contained none to mask.

@@ -1,0 +1,29 @@
+[
+  {
+    "orderId": 28580357696,
+    "symbol": "BTCUSDT",
+    "status": "NEW",
+    "clientOrderId": "pulsetrade-rec-1789116070165",
+    "price": "74260.40",
+    "avgPrice": "0",
+    "origQty": "0.0008",
+    "executedQty": "0",
+    "cumQuote": "0.000000",
+    "timeInForce": "GTC",
+    "type": "LIMIT",
+    "reduceOnly": false,
+    "closePosition": false,
+    "side": "BUY",
+    "positionSide": "BOTH",
+    "stopPrice": "0",
+    "workingType": "CONTRACT_PRICE",
+    "priceProtect": false,
+    "origType": "LIMIT",
+    "priceMatch": "NONE",
+    "selfTradePreventionMode": "EXPIRE_MAKER",
+    "goodTillDate": 0,
+    "time": 1789116070010,
+    "strategyType": "",
+    "updateTime": 1789116070010
+  }
+]

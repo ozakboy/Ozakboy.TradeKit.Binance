@@ -6,8 +6,8 @@
     <RootNamespace>Ozakboy.TradeKit.Binance</RootNamespace>
 
     <Title>Ozakboy.TradeKit.Binance — 幣安 USDⓈ-M 永續合約交易所實作</Title>
-    <Description>Ozakboy.TradeKit.Abstractions 的幣安 USDⓈ-M 永續合約實作,建構在 Ozakboy.Http 的簽章／限流／重試管線之上,不使用任何第三方社群套件。本版提供交易規則(exchangeInfo 的 PRICE_FILTER / LOT_SIZE / MIN_NOTIONAL / MARKET_LOT_SIZE)對映與每日快照快取、伺服器時間、唯讀帳戶與持倉查詢,以及幣安錯誤碼到交易所中立錯誤碼的完整對映(時間戳偏移、簽章無效、IP 白名單、保證金不足、限流各自可辨識)。REST 與 WebSocket 端點以「環境」成組提供,杜絕主網與 Testnet 混接;交易規則快取以環境為鍵,避免 Testnet 的步進值被誤用到主網。A Binance USDⓈ-M perpetual futures implementation of Ozakboy.TradeKit.Abstractions, built on the Ozakboy.Http signing, rate-limiting, and retry pipeline with no third-party dependencies. This release covers exchange-info trading rules with a per-environment daily cache, server time, read-only account and position queries, and a full Binance-to-neutral error code mapping.</Description>
-    <PackageTags>ozakboy;tradekit;binance;binance-futures;usds-m;perpetual;futures;exchange;trading;exchangeinfo;tick-size;step-size;min-notional;hmac-sha256;rate-limit;testnet;result-type;decimal;dotnet;csharp</PackageTags>
+    <Description>Ozakboy.TradeKit.Abstractions 的幣安 USDⓈ-M 永續合約實作,建構在 Ozakboy.Http 的簽章／限流／重試管線之上,不使用任何第三方社群套件。本版提供交易規則(exchangeInfo 的 PRICE_FILTER / LOT_SIZE / MIN_NOTIONAL / MARKET_LOT_SIZE)對映與每日快照快取、伺服器時間、帳戶與持倉查詢,以及下單、撤單、查單與槓桿／保證金模式設定(下單一律不可重試,並以 clientOrderId 作為冪等識別碼),再加上幣安錯誤碼到交易所中立錯誤碼的完整對映(時間戳偏移、簽章無效、IP 白名單、保證金不足、限流各自可辨識)。REST 與 WebSocket 端點以「環境」成組提供,杜絕主網與 Testnet 混接;交易規則快取以環境為鍵,避免 Testnet 的步進值被誤用到主網。A Binance USDⓈ-M perpetual futures implementation of Ozakboy.TradeKit.Abstractions, built on the Ozakboy.Http signing, rate-limiting, and retry pipeline with no third-party dependencies. This release covers exchange-info trading rules with a per-environment daily cache, server time, account and position queries, order placement, cancellation and lookup, leverage and margin mode, and a full Binance-to-neutral error code mapping. Order placement is never retried and carries a clientOrderId as its idempotency key.</Description>
+    <PackageTags>ozakboy;tradekit;binance;binance-futures;usds-m;perpetual;futures;exchange;trading;exchangeinfo;tick-size;step-size;min-notional;order;idempotency;client-order-id;no-retry;hmac-sha256;rate-limit;testnet;result-type;decimal;dotnet;csharp</PackageTags>
 
     <PackageProjectUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</RepositoryUrl>
@@ -50,6 +50,16 @@
     <PackageReference Include="Ozakboy.TradeKit.Abstractions" Version="0.1.1" />
     <PackageReference Include="Ozakboy.Http" Version="0.2.0" />
     <PackageReference Include="Ozakboy.Core.Abstractions" Version="0.3.0" />
+    <!--
+      行情串流的連線管理(重連、重連後重放訂閱、閒置逾時存活偵測、有界佇列背壓)一律用這個套件,
+      本套件不自己實作。它的遞移相依只有 Microsoft.Extensions.Logging.Abstractions 與
+      Ozakboy.Core.Abstractions 0.3.0(與上面那一行同版),整棵樹仍然沒有任何第三方社群套件。
+      All market stream connection management — reconnection, subscription replay, idle-timeout liveness, and
+      bounded-queue backpressure — comes from this package rather than being reimplemented here. It brings in
+      only Microsoft.Extensions.Logging.Abstractions and the same Ozakboy.Core.Abstractions 0.3.0 pinned above,
+      so the transitive graph still contains no community package.
+    -->
+    <PackageReference Include="Ozakboy.WebSockets" Version="0.2.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.12" />
   </ItemGroup>

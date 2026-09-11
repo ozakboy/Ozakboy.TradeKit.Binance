@@ -8,6 +8,85 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## 未發布 / Unreleased
+
+### 新增功能 / Added
+
+- **交易端點 / Trading endpoints**:`BinanceFuturesClient` 改為實作完整的 `IExchangeClient`,
+  補齊 `PlaceOrderAsync`、`CancelOrderAsync`、`CancelAllOrdersAsync`、`GetOrderAsync`、
+  `GetOpenOrdersAsync`、`SetLeverageAsync`、`SetMarginModeAsync`。
+  `AddBinanceFutures` 另外以 `IExchangeClient` 介面註冊,讓策略層只相依介面。
+  The client now implements the whole of `IExchangeClient`, and the registration also binds the interface.
+
+- **下單絕不重試 / Orders are never retried**:`PlaceOrderAsync` 送出的請求同時以 `AsNonIdempotent()`
+  標記並釘上 `RetryPolicy.NoRetry`。逾時不代表交易所沒收到,盲目重送開出來的是兩倍的部位。
+  撤單、查單、改槓桿與改保證金模式都明確宣告為冪等,可以安全重試;
+  `BinanceApiClient.SendSignedAsync` 拒絕 `RequestIdempotency.Inferred`,強迫每個呼叫端自己表態。
+  The placement request is both marked non-idempotent and pinned to `RetryPolicy.NoRetry`, and the signed
+  sender refuses an inferred idempotency so that every call site has to decide.
+
+- **冪等識別碼 / Idempotency key**:新增 `BinanceClientOrderId`,產生與檢查幣安的 `newClientOrderId`
+  (格式 `^[\.A-Z\:/a-z0-9_-]{1,36}$`)。每張單都帶編號;呼叫端沒指定時自動產生,
+  而且<b>失敗時也帶得回來</b> —— 放在 `Error.Data` 的 `BinanceErrorDataKeys.ClientOrderId`。
+  少了這一項,自動產生的編號會隨著失敗一起消失,那張單就成了既查不到也撤不掉的部位。
+  A generated id survives a failed submission, without which the order could be neither found nor cancelled.
+
+- **訂單類型對映 / Order type mapping**:新增 `BinanceOrderMapper`,把七種抽象層類型對映成幣安的
+  `type` 與各自的必填參數組合,並逐型別「按需加入」而非「全部加入再清掉」——
+  幣安對多送一個不相干的參數同樣回 `-1106`。反向對映(狀態、方向、有效期限、持倉方向)一併提供。
+  Parameters are added per type on demand, because Binance rejects an extra parameter as firmly as a missing one.
+
+- **本地校正 / Local normalisation**:`PlaceOrderAsync` 送出前會取該商品的交易規則,
+  數量向下對齊步進、價格對齊跳動點;校正後低於 `minQty` 或 `minNotional` 時直接失敗,不送出去換一次拒單。
+  Normalised before sending, and failing locally rather than spending a round trip on a certain rejection.
+
+- **幣安專屬的嚴格規則 / Binance-only validation**:抽象層通過但幣安會拒的幾條,一律在本地擋下 ——
+  `clientOrderId` 的格式與長度、`closePosition` 只能用於 `STOP_MARKET` 與 `TAKE_PROFIT_MARKET`、
+  雙向模式不可帶 `reduceOnly`、移動停損的回撤比例上限是 10 而非抽象層允許的 100,
+  以及未定義的列舉值一律回傳失敗而不是讓對映表擲出例外。
+
+- **錯誤碼 / Error codes**:新增 `-4120`(`OrderTypeNotSupportedOnEndpoint`),
+  對映成 `TradeErrorCodes.NotSupported` 並附上說明。
+
+### 技術改進 / Changed
+
+- **測試 fixture 全面換成真實錄製 / Fixtures are now genuine recordings**:
+  上一版的 `account.json` 與 `positionRisk*.json` 是依官方文件手寫的,欄位名稱未經真實回應驗證。
+  本版以 2026-09-11 對 Testnet 的實際簽章請求重新錄製,並新增下單、查單、撤單、撤銷全部掛單、
+  改槓桿與三種錯誤回應的實錄。**驗證結果:手寫版的欄位名稱全部正確**,包含
+  `positionRisk` 的 `unRealizedProfit`(大寫 R)與 `account` 的 `unrealizedProfit`(小寫 r)。
+  實錄另外證實 `account` 的 `positions[]` 確實沒有 `markPrice` 與 `liquidationPrice`,
+  也就是帳戶快照多打一次 `positionRisk` 的理由。
+  The previously hand-written fixtures were replaced with live Testnet recordings, which confirmed that every
+  hand-written field name was correct.
+
+- **整合測試真的會下單 / The integration tests really place orders**:
+  上一版因為沒有 Testnet 金鑰而全部 Inconclusive,本版實跑。測試單一律掛在標記價下方約 4% 且用 GTC
+  (不會成交)、一律在 `finally` 裡撤掉、一律帶 `pulsetrade-test-` 前綴,
+  並以一條測試加一段 `ClassCleanup` 查詢全部商品確認沒有殘留掛單。
+
+### 已知限制 / Known limitations
+
+- **條件單目前不被 `/fapi/v1/order` 受理**。2026-09-11 在 Testnet 實測,`STOP_MARKET` 與
+  `TRAILING_STOP_MARKET` 都回 `-4120`,幣安要求改用 Algo Order 專用端點。
+  參數對映已完成也有測試覆蓋,但端到端只驗到「被這個端點拒絕」;
+  真正要下條件單需要另外接 Algo Order 端點,不在本階段範圍。
+  Conditional order types are refused by this endpoint with `-4120`; the mapping is implemented and tested but
+  end-to-end placement would need the Algo Order endpoints.
+
+- **`POST /fapi/v1/order` 的回應沒有 `avgPrice` 也沒有 `cumQuote`**(實錄確認,只有 `cumQty`),
+  因此立即成交的委託在下單回應裡讀到的 `AverageFillPrice` 與 `FilledNotional` 都是 0。
+  要知道成交均價請改以 `GetOrderAsync` 查單,那份回應兩個欄位都有。
+  The place-order reply carries neither field, so the average fill price of an immediately filled order has to
+  come from a follow-up lookup.
+
+- **非零的未實現損益尚未經真實回應驗證**。錄製當時 Testnet 帳戶是空手的,欄位名稱已由實錄證實
+  (抄錯會讓解析直接失敗),但「非零的值有被讀進模型」是以替換過數值的 fixture 驗的。
+  要真正驗證需要在 Testnet 開一個會成交的部位,而本階段的紀律是測試單一律不得成交。
+
+- **各交易端點的權重未以回應標頭實測覆核**。`x-mbx-used-weight-1m` 是一分鐘滾動窗的累計值,
+  單次呼叫前後相減得不到穩定的差值,因此權重仍沿用官方文件。
+
 ## [0.1.0] - 2026-09-11
 
 首個版本。幣安 USDⓈ-M 永續合約的交易規則、伺服器時間與唯讀帳戶查詢,建構在 `Ozakboy.Http` 的

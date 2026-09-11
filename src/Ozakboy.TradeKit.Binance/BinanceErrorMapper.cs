@@ -357,6 +357,10 @@ public static class BinanceErrorMapper
         BinanceApiErrorCodes.UnsupportedOperation =>
             (TradeErrorCodes.NotSupported, ErrorCategory.NotSupported, string.Empty),
 
+        BinanceApiErrorCodes.OrderTypeNotSupportedOnEndpoint =>
+            (TradeErrorCodes.NotSupported, ErrorCategory.NotSupported,
+                "(這個委託類型已不由 /fapi/v1/order 受理,幣安要求改用 Algo Order 專用端點;2026-09-11 在 Testnet 實測,STOP_MARKET 與 TRAILING_STOP_MARKET 都是這一碼。參數沒有錯,改參數也不會過。This order type is no longer accepted on /fapi/v1/order and Binance directs it to the Algo Order endpoints; measured on Testnet on 2026-09-11 for both STOP_MARKET and TRAILING_STOP_MARKET. The parameters are not at fault and editing them will not help.)"),
+
         BinanceApiErrorCodes.InvalidTimestamp =>
             (TradeErrorCodes.TimestampOutOfSync, ErrorCategory.Validation,
                 "(本機時鐘與交易所時間偏移超過 recvWindow。重試不會成功,請先以伺服器時間校正本機時鐘或放寬 recvWindow。The local clock is outside recvWindow; retrying will not help, so re-synchronise against server time or widen recvWindow first.)"),

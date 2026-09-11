@@ -1,0 +1,5 @@
+{
+  "symbol": "BTCUSDT",
+  "leverage": 20,
+  "maxNotionalValue": "20000000"
+}

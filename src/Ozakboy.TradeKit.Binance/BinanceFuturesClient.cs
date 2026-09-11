@@ -1,38 +1,48 @@
 using Ozakboy.Http;
+using Ozakboy.Http.Retry;
 using Ozakboy.Http.Signing;
 
 namespace Ozakboy.TradeKit.Binance;
 
 /// <summary>
-/// 幣安 USDⓈ-M 永續合約的用戶端。本版提供交易規則與唯讀的帳戶、持倉查詢。
-/// The Binance USDⓈ-M perpetual futures client. This release provides trading rules plus read-only account and
-/// position queries.
+/// 幣安 USDⓈ-M 永續合約的用戶端:交易規則、帳戶與持倉查詢,以及下單、撤單、查單與帳戶設定。
+/// The Binance USDⓈ-M perpetual futures client: trading rules, account and position queries, and order
+/// placement, cancellation, lookup, and account settings.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 目前實作 <see cref="IExchangeInfoProvider"/>,尚未實作完整的 <see cref="IExchangeClient"/> ——
-/// 下單、撤單、查單、改槓桿與保證金模式屬於下一階段。介面刻意先窄後寬:宣告一個做不到的介面,
-/// 會讓呼叫端在編譯期看到方法、在執行期才發現它擲出「未實作」,那比編譯不過晚得多也貴得多。
-/// This implements <see cref="IExchangeInfoProvider"/> and not yet the full
-/// <see cref="IExchangeClient"/>: placing, cancelling, and querying orders, and changing leverage and margin
-/// mode, belong to the next stage. The interface is deliberately narrow first. Declaring one that cannot be
-/// honoured lets callers bind at compile time and discover a "not implemented" at run time, which is far later
-/// and far more expensive than a build error.
+/// 實作完整的 <see cref="IExchangeClient"/>。交易規則的部分整個委派給
+/// <see cref="BinanceExchangeInfoProvider"/>,包含它的環境綁定快取。
+/// This implements the whole of <see cref="IExchangeClient"/>. The trading-rule half is delegated wholesale to
+/// <see cref="BinanceExchangeInfoProvider"/>, environment-bound cache and all.
 /// </para>
 /// <para>
-/// 交易規則的部分整個委派給 <see cref="BinanceExchangeInfoProvider"/>,包含它的環境綁定快取。
-/// 下一階段補上交易方法時,這個型別會改為實作 <see cref="IExchangeClient"/>,而現有的方法簽章都不會變 ——
-/// 應用層現在寫的呼叫不需要跟著改。
-/// The trading-rule half is delegated wholesale to <see cref="BinanceExchangeInfoProvider"/>, environment-bound
-/// cache and all. When the next stage adds the trading methods this type will implement
-/// <see cref="IExchangeClient"/> with none of the existing signatures changing, so calls written today need no
-/// revision.
+/// <b>下單絕不重試。</b> <see cref="PlaceOrderAsync"/> 是這個型別裡唯一標記為非冪等的請求 ——
+/// 逾時不代表交易所沒收到,盲目重送開出來的是兩倍的部位。撤單、查單、改槓桿與改保證金模式都是冪等的,
+/// 可以安全重試。
+/// <b>Orders are never retried.</b> <see cref="PlaceOrderAsync"/> is the only request here marked
+/// non-idempotent: a timeout does not mean the exchange missed it, and re-sending blindly opens twice the
+/// intended position. Cancellation, lookup, leverage, and margin mode are all idempotent and retry safely.
+/// </para>
+/// <para>
+/// 送單之前一律以 <see cref="SymbolInfo"/> 的交易規則在本地校正價量,數量一律向下對齊;校正後低於最小
+/// 下單量或最小名目價值時直接回傳失敗,不送出去換一次拒單。省下的不只是一趟往返,還有一份限流額度。
+/// Every submission is normalised locally against the symbol's rules first, with quantities always aligned
+/// downwards. A result below the minimum quantity or notional fails here rather than travelling to the exchange
+/// to be rejected, which saves a round trip and a unit of rate-limit quota.
 /// </para>
 /// </remarks>
-public sealed class BinanceFuturesClient : IExchangeInfoProvider, IDisposable
+public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
 {
     private const string AccountOperation = "查詢帳戶資訊 / account query";
     private const string PositionOperation = "查詢持倉 / position query";
+    private const string PlaceOrderOperation = "送出委託 / place order";
+    private const string CancelOrderOperation = "撤銷委託 / cancel order";
+    private const string CancelAllOrdersOperation = "撤銷全部掛單 / cancel all orders";
+    private const string QueryOrderOperation = "查詢委託 / query order";
+    private const string OpenOrdersOperation = "查詢未結委託 / open orders query";
+    private const string LeverageOperation = "設定槓桿 / set leverage";
+    private const string MarginModeOperation = "設定保證金模式 / set margin mode";
 
     private readonly BinanceApiClient _api;
     private readonly BinanceExchangeInfoProvider _exchangeInfo;
@@ -287,6 +297,471 @@ public sealed class BinanceFuturesClient : IExchangeInfoProvider, IDisposable
                 .WithData(BinanceErrorDataKeys.Symbol, symbol),
         };
     }
+
+    /// <summary>
+    /// 送出一張委託。<b>失敗時絕不可以重送</b>,請用 <see cref="Order.ClientOrderId"/> 查單確認。
+    /// Places one order. <b>Never re-send on failure</b>; confirm with <see cref="Order.ClientOrderId"/> instead.
+    /// </summary>
+    /// <param name="request">下單請求。The order request.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>交易所接受後的委託,或失敗原因。The order as accepted, or the reason it failed.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="request"/> 為 <see langword="null"/> 時擲出。
+    /// Thrown when <paramref name="request"/> is <see langword="null"/>.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// <b>逾時之後的正確處置是查單,不是重送。</b> HTTP 逾時只代表「沒收到回應」,不代表交易所沒收到請求 ——
+    /// 那張單可能已經在簿上,甚至已經成交。這時重送會得到兩張單、兩倍的部位,而那是真金白銀的損失。
+    /// 正確做法是拿這次使用的 <c>clientOrderId</c> 呼叫
+    /// <see cref="GetOrderAsync(string, OrderIdentifier, CancellationToken)"/>:查得到就是進去了,
+    /// 查到 <see cref="TradeErrorCodes.OrderNotFound"/> 才代表沒進去,那時才可以重下。
+    /// <b>After a timeout, look the order up; do not send it again.</b> An HTTP timeout says only that no reply
+    /// arrived, not that the request never landed: the order may already be resting, or filled. Re-sending then
+    /// yields two orders and twice the position, in real money. The correct move is to call
+    /// <see cref="GetOrderAsync(string, OrderIdentifier, CancellationToken)"/> with the same
+    /// <c>clientOrderId</c>: finding it means it went through, and only a
+    /// <see cref="TradeErrorCodes.OrderNotFound"/> licenses a fresh submission.
+    /// </para>
+    /// <para>
+    /// 這個方法送出的請求以 <c>AsNonIdempotent()</c> 標記,並額外釘上
+    /// <see cref="RetryPolicy.NoRetry"/>,因此 HTTP 管線不會替它重試。上層也不可以自行重試。
+    /// The request is marked with <c>AsNonIdempotent()</c> and additionally pinned to
+    /// <see cref="RetryPolicy.NoRetry"/>, so the HTTP pipeline will not retry it. Neither may callers.
+    /// </para>
+    /// <para>
+    /// <see cref="OrderRequest.ClientOrderId"/> 留白時由本方法產生一個,並且無論成敗都會帶回來:
+    /// 成功時在 <see cref="Order.ClientOrderId"/>,失敗時在
+    /// <see cref="Error.Data"/> 的 <see cref="BinanceErrorDataKeys.ClientOrderId"/> 鍵。
+    /// 若希望在請求送出<b>之前</b>就把編號寫進自己的委託紀錄,請自行呼叫
+    /// <see cref="BinanceClientOrderId.Generate()"/> 並填進請求。
+    /// A blank <see cref="OrderRequest.ClientOrderId"/> is generated here and comes back either way: in
+    /// <see cref="Order.ClientOrderId"/> on success, and under the
+    /// <see cref="BinanceErrorDataKeys.ClientOrderId"/> key of <see cref="Error.Data"/> on failure. To hold the
+    /// id <b>before</b> the request leaves, generate it yourself with
+    /// <see cref="BinanceClientOrderId.Generate()"/> and set it on the request.
+    /// </para>
+    /// <para>
+    /// 送出之前會先取得該商品的交易規則並校正價量(數量向下對齊、價格對齊跳動點)。
+    /// 校正後低於最小下單量或最小名目價值時直接失敗,請求不會送出。
+    /// The symbol's trading rules are fetched and applied first: quantities align downwards, prices align to the
+    /// tick. A result below the minimum quantity or notional fails without the request leaving.
+    /// </para>
+    /// </remarks>
+    public async Task<Result<Order>> PlaceOrderAsync(
+        OrderRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(request);
+
+        // 先做本地驗證再查交易規則。順序有差:欄位組合不合法的請求不該為了取得規則而多打一次網路。
+        // Validation comes before the rule lookup: a request with an invalid field combination should not cost
+        // a network call just to fetch rules it will never use.
+        var validation = request.Validate();
+
+        if (validation.IsFailure)
+        {
+            return validation.Error!;
+        }
+
+        var symbolResult = await _exchangeInfo
+            .GetSymbolAsync(request.Symbol, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!symbolResult.TryGetValue(out var symbolInfo))
+        {
+            return symbolResult.ToFailure<Order>();
+        }
+
+        var normalization = request.NormalizeFor(symbolInfo);
+
+        if (!normalization.TryGetValue(out var normalized))
+        {
+            return normalization.ToFailure<Order>();
+        }
+
+        var clientOrderId = string.IsNullOrWhiteSpace(request.ClientOrderId)
+            ? BinanceClientOrderId.Generate(_api.UtcNow)
+            : request.ClientOrderId;
+
+        var query = BinanceOrderMapper.BuildPlaceOrder(normalized, clientOrderId);
+
+        if (!query.TryGetValue(out var builder))
+        {
+            // 這一條路徑上請求還沒送出,所以不附「請查單」的提示 —— 那個提示只在單可能已經在簿上時才成立。
+            // Nothing has been sent on this path, so no "go look it up" hint is attached: that advice only
+            // holds once the order might be resting.
+            return query.ToFailure<Order>();
+        }
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Post,
+                BinanceApiPaths.Order,
+                builder,
+                BinanceRequestWeights.PlaceOrder,
+                PlaceOrderOperation,
+                RequestIdempotency.NonIdempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!body.TryGetValue(out var json))
+        {
+            return WithClientOrderId(body.Error!, clientOrderId);
+        }
+
+        var order = BinanceResponseReader.ReadOrder(json, _api.UtcNow);
+
+        // 解析失敗代表「交易所收下了,但這一側讀不懂回應」——那張單確實存在,編號更不能弄丟。
+        // A parse failure means the exchange accepted it and this side could not read the reply: the order is
+        // real, which makes losing the id worse rather than better.
+        return order.IsFailure ? WithClientOrderId(order.Error!, clientOrderId) : order;
+    }
+
+    /// <summary>
+    /// 撤銷一張委託。
+    /// Cancels one order.
+    /// </summary>
+    /// <param name="symbol">交易對代碼。The symbol.</param>
+    /// <param name="identifier">訂單識別碼。The order identifier.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>撤銷後的委託,或失敗原因。The order after cancellation, or the reason it failed.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// 撤單是冪等的,因此標記為可重試。重複撤同一張單的結果是 <c>-2011</c>,對映成
+    /// <see cref="TradeErrorCodes.OrderNotCancelable"/> —— 那句話的意思是「它已經不在簿上了」,
+    /// 不是「撤單失敗,還掛著」。相較之下不重試的代價是留下一張以為已撤、實際還活著的單,那危險得多。
+    /// Cancellation is idempotent and therefore marked retryable. Cancelling the same order twice earns a
+    /// <c>-2011</c>, mapped to <see cref="TradeErrorCodes.OrderNotCancelable"/>, which means "it is no longer on
+    /// the book" rather than "the cancellation failed and it is still live". Not retrying risks leaving an order
+    /// believed cancelled but still working, which is far worse.
+    /// </remarks>
+    public async Task<Result<Order>> CancelOrderAsync(
+        string symbol,
+        OrderIdentifier identifier,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var query = BinanceOrderMapper.BuildOrderLookup(symbol, identifier);
+
+        if (!query.TryGetValue(out var builder))
+        {
+            return query.ToFailure<Order>();
+        }
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Delete,
+                BinanceApiPaths.Order,
+                builder,
+                BinanceRequestWeights.CancelOrder,
+                CancelOrderOperation,
+                RequestIdempotency.Idempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return body.TryGetValue(out var json)
+            ? BinanceResponseReader.ReadOrder(json, _api.UtcNow)
+            : body.ToFailure<Order>();
+    }
+
+    /// <summary>
+    /// 撤銷某商品的全部掛單。沒有掛單時視為成功。
+    /// Cancels every open order on one symbol, treating "there were none" as success.
+    /// </summary>
+    /// <param name="symbol">交易對代碼。The symbol.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>全部撤銷成功時為成功,否則為失敗原因。Success when all were cancelled, otherwise the failure.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// 緊急出場的流程會無條件先撤單再平倉,因此「本來就沒單」必須是成功而不是失敗 ——
+    /// 在那條路徑上回報失敗會讓出場流程停在第一步,而部位還開著。
+    /// An emergency exit cancels before closing unconditionally, so "there was nothing to cancel" has to be a
+    /// success: a failure there stops the exit at its first step with the position still open.
+    /// </remarks>
+    public async Task<Result> CancelAllOrdersAsync(string symbol, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return TradeErrors.InvalidQuery("交易對代碼不可為空白。The symbol must not be blank.");
+        }
+
+        var query = QueryParameters.CreateBuilder().Add(BinanceConstants.SymbolParameterName, symbol);
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Delete,
+                BinanceApiPaths.AllOpenOrders,
+                query,
+                BinanceRequestWeights.CancelAllOpenOrders,
+                CancelAllOrdersOperation,
+                RequestIdempotency.Idempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return body.TryGetValue(out var json)
+            ? BinanceResponseReader.ReadAcknowledgement(json, BinanceApiPaths.AllOpenOrders, _api.Endpoints)
+            : body.ToResult();
+    }
+
+    /// <summary>
+    /// 查詢單一委託。
+    /// Looks up one order.
+    /// </summary>
+    /// <param name="symbol">交易對代碼。The symbol.</param>
+    /// <param name="identifier">訂單識別碼。The order identifier.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>委託,或失敗原因。The order, or the reason it failed.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// 這是 <see cref="PlaceOrderAsync"/> 逾時之後唯一正確的下一步:用同一個
+    /// <see cref="OrderIdentifier.ClientOrderId"/> 查回來,確認那張單到底進去了沒有。
+    /// This is the only correct next step after <see cref="PlaceOrderAsync"/> times out: look the order up by
+    /// the same <see cref="OrderIdentifier.ClientOrderId"/> and find out whether it reached the exchange.
+    /// </remarks>
+    public async Task<Result<Order>> GetOrderAsync(
+        string symbol,
+        OrderIdentifier identifier,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var query = BinanceOrderMapper.BuildOrderLookup(symbol, identifier);
+
+        if (!query.TryGetValue(out var builder))
+        {
+            return query.ToFailure<Order>();
+        }
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Get,
+                BinanceApiPaths.Order,
+                builder,
+                BinanceRequestWeights.QueryOrder,
+                QueryOrderOperation,
+                RequestIdempotency.Idempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return body.TryGetValue(out var json)
+            ? BinanceResponseReader.ReadOrder(json, _api.UtcNow)
+            : body.ToFailure<Order>();
+    }
+
+    /// <summary>
+    /// 查詢尚未結束的委託。
+    /// Lists the orders that are still live.
+    /// </summary>
+    /// <param name="symbol">
+    /// 要查詢的交易對;<see langword="null"/> 代表全部商品。
+    /// The symbol to query, or <see langword="null"/> for every symbol.
+    /// </param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>掛單清單,或失敗原因。The open orders, or the reason it failed.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// 不指定商品的權重是 <b>40</b>,指定時是 1 —— 四十倍。輪詢掛單時請務必帶上商品代碼,
+    /// 不帶的版本只適合偶爾做一次全帳戶盤點。
+    /// Omitting the symbol costs a weight of <b>40</b> against 1 with it, forty times as much. Always pass the
+    /// symbol when polling; the symbol-less form suits an occasional whole-account sweep and nothing else.
+    /// </para>
+    /// <para>
+    /// 空字串與空白字串<b>不</b>等同於 <see langword="null"/>,而是回報查詢條件不合法。
+    /// 那幾乎一定是呼叫端的變數沒填到,靜默改打全商品會讓一個 bug 變成四十倍的權重支出。
+    /// An empty or blank string is <b>not</b> treated as <see langword="null"/> but reported as an invalid
+    /// query. It almost always means an unfilled variable, and silently widening it to every symbol turns one
+    /// bug into forty times the weight.
+    /// </para>
+    /// </remarks>
+    public async Task<Result<IReadOnlyList<Order>>> GetOpenOrdersAsync(
+        string? symbol = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (symbol is not null && string.IsNullOrWhiteSpace(symbol))
+        {
+            return TradeErrors.InvalidQuery(
+                "交易對代碼是空白字串。要查詢全部商品請傳 null,空白幾乎都是變數沒填到。The symbol is a blank string; pass null to query every symbol, since a blank almost always means an unfilled variable.");
+        }
+
+        var query = symbol is null
+            ? null
+            : QueryParameters.CreateBuilder().Add(BinanceConstants.SymbolParameterName, symbol);
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Get,
+                BinanceApiPaths.OpenOrders,
+                query,
+                BinanceRequestWeights.OpenOrders(symbol is not null),
+                OpenOrdersOperation,
+                RequestIdempotency.Idempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return body.TryGetValue(out var json)
+            ? BinanceResponseReader.ReadOrders(json, _api.UtcNow)
+            : body.ToFailure<IReadOnlyList<Order>>();
+    }
+
+    /// <summary>
+    /// 設定某商品的槓桿倍數。
+    /// Sets the leverage on one symbol.
+    /// </summary>
+    /// <param name="symbol">交易對代碼。The symbol.</param>
+    /// <param name="leverage">槓桿倍數,必須至少為 1。The leverage; at least 1.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>設定成功時為成功,否則為失敗原因。Success when applied, otherwise the failure.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// 冪等:把槓桿設成它已經是的值不會出錯,交易所照樣回成功。因此這個請求可以重試。
+    /// Idempotent: setting the leverage to what it already is is not an error and still answers success, so the
+    /// request may be retried.
+    /// </remarks>
+    public async Task<Result> SetLeverageAsync(
+        string symbol,
+        int leverage,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return TradeErrors.InvalidQuery("交易對代碼不可為空白。The symbol must not be blank.");
+        }
+
+        if (leverage < 1)
+        {
+            return new Error(
+                TradeErrorCodes.LeverageNotAllowed,
+                $"槓桿倍數必須至少為 1,收到 {leverage}。The leverage must be at least 1 but was {leverage}.",
+                ErrorCategory.Validation)
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Post,
+                BinanceApiPaths.Leverage,
+                BinanceOrderMapper.BuildLeverage(symbol, leverage),
+                BinanceRequestWeights.AccountSetting,
+                LeverageOperation,
+                RequestIdempotency.Idempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return body.TryGetValue(out var json)
+            ? BinanceResponseReader.ReadAcknowledgement(json, BinanceApiPaths.Leverage, _api.Endpoints)
+            : body.ToResult();
+    }
+
+    /// <summary>
+    /// 設定某商品的保證金模式。模式本來就是目標值時視為成功。
+    /// Sets the margin mode on one symbol, treating "already in that mode" as success.
+    /// </summary>
+    /// <param name="symbol">交易對代碼。The symbol.</param>
+    /// <param name="marginMode">保證金模式。The margin mode.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>設定成功時為成功,否則為失敗原因。Success when applied, otherwise the failure.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// 幣安對「模式沒有變」回的是錯誤 <c>-4046</c>,而不是成功。這裡把它吃掉並回報成功:
+    /// 啟動流程通常會無條件把每個商品設成全倉,若不吃掉,每次啟動都會冒出一串假的錯誤告警,
+    /// 而真正的失敗就淹沒在裡面。
+    /// Binance answers "no change needed" with the error <c>-4046</c> rather than with success. That case is
+    /// swallowed here: a start-up routine typically forces every symbol to cross margin unconditionally, and
+    /// without swallowing it every start raises a row of false alerts that bury the real failures.
+    /// </para>
+    /// <para>
+    /// 也因為這個吃掉,重試是安全的:重送只會再換一個 <c>-4046</c>,而它已經被當成成功。
+    /// That swallowing is also what makes retrying safe: a re-send earns another <c>-4046</c>, which already
+    /// counts as success.
+    /// </para>
+    /// </remarks>
+    public async Task<Result> SetMarginModeAsync(
+        string symbol,
+        MarginMode marginMode,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return TradeErrors.InvalidQuery("交易對代碼不可為空白。The symbol must not be blank.");
+        }
+
+        if (!Enum.IsDefined(marginMode))
+        {
+            return TradeErrors.InvalidQuery(
+                $"未定義的保證金模式:{(int)marginMode}。Undefined margin mode: {(int)marginMode}.");
+        }
+
+        var body = await _api
+            .SendSignedAsync(
+                HttpMethod.Post,
+                BinanceApiPaths.MarginType,
+                BinanceOrderMapper.BuildMarginType(symbol, marginMode),
+                BinanceRequestWeights.AccountSetting,
+                MarginModeOperation,
+                RequestIdempotency.Idempotent,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (body.TryGetValue(out var json))
+        {
+            return BinanceResponseReader.ReadAcknowledgement(json, BinanceApiPaths.MarginType, _api.Endpoints);
+        }
+
+        return IsNoChangeNeeded(body.Error!)
+            ? Result.Success()
+            : body.ToResult();
+    }
+
+    /// <summary>
+    /// 判斷這個錯誤是不是幣安的「保證金模式不需要變更」(<c>-4046</c>)。
+    /// Determines whether an error is Binance's "no need to change margin type" (<c>-4046</c>).
+    /// </summary>
+    private static bool IsNoChangeNeeded(Error error) =>
+        error.TryGetInt64(BinanceErrorDataKeys.ApiCode, out var apiCode)
+        && apiCode == BinanceApiErrorCodes.NoNeedToChangeMarginType;
+
+    /// <summary>
+    /// 把用戶端訂單編號接到錯誤上,讓呼叫端在下單失敗之後仍然查得回那張單。
+    /// Attaches the client order id to an error so the caller can still find the order after a failed
+    /// submission.
+    /// </summary>
+    private static Error WithClientOrderId(Error error, string clientOrderId) =>
+        new Error(
+            error.Code,
+            $"{error.Message}(這張單的 clientOrderId 是 {clientOrderId};若無法確定它是否已經送達交易所,請用這個編號查單,不要重送。The clientOrderId of this order is {clientOrderId}; if it is unclear whether the exchange received it, look it up by that id rather than re-sending.)",
+            error.Category)
+        {
+            Exception = error.Exception,
+            Data = error.Data,
+        }.WithData(BinanceErrorDataKeys.ClientOrderId, clientOrderId);
 
     /// <inheritdoc />
     public void Dispose()

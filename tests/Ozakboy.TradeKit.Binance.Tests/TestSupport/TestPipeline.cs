@@ -23,9 +23,23 @@ internal static class TestPipeline
     /// 建立測試用的設定:指向 Testnet 以外的環境時請自行覆寫,憑證一律是明顯的假值。
     /// Builds the test settings. Credentials are always obviously fake values.
     /// </summary>
+    /// <summary>
+    /// 不退避、最多三次的重試策略。用來驗證「哪些請求會被重試」,而不必真的等掉那幾百毫秒。
+    /// A three-attempt policy with no back-off, so that "which requests get retried" can be asserted without
+    /// waiting out the delays.
+    /// </summary>
+    public static RetryPolicy ImmediateRetries { get; } = new()
+    {
+        MaxAttempts = 3,
+        BaseDelay = TimeSpan.Zero,
+        Strategy = BackoffStrategy.None,
+        JitterRatio = 0d,
+    };
+
     public static BinanceOptions CreateOptions(
         BinanceEnvironment environment = BinanceEnvironment.Mainnet,
-        bool withCredentials = true)
+        bool withCredentials = true,
+        RetryPolicy? retryPolicy = null)
     {
         var options = new BinanceOptions
         {
@@ -41,10 +55,11 @@ internal static class TestPipeline
             options.SecretKey = "FAKE-SECRET-NOT-A-REAL-CREDENTIAL";
         }
 
-        // 測試不驗重試行為,關掉可避免一個失敗案例被重試三次而讓呼叫次數的斷言失準。
-        // Retries are off: they would otherwise turn one failing case into three calls and break the
-        // call-count assertions.
-        options.Retry.Policy = RetryPolicy.NoRetry;
+        // 預設關掉重試,避免一個失敗案例被重試三次而讓呼叫次數的斷言失準。
+        // 專門要驗重試行為的測試自己傳 ImmediateRetries 進來。
+        // Retries are off by default, or one failing case would become three calls and break the call-count
+        // assertions. The tests that exist to exercise retrying pass ImmediateRetries in themselves.
+        options.Retry.Policy = retryPolicy ?? RetryPolicy.NoRetry;
 
         return options;
     }

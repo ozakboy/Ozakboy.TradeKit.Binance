@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace Ozakboy.TradeKit.Binance;
@@ -29,6 +30,12 @@ public static class BinanceResponseReader
     private const string CrossMarginType = "cross";
     private const string LongPositionSide = "LONG";
     private const string ShortPositionSide = "SHORT";
+
+    /// <summary>
+    /// 幣安在回應本文裡用來表示「成功」的 <c>code</c> 值。
+    /// The <c>code</c> value Binance uses inside a response body to mean success.
+    /// </summary>
+    private const int BinanceSuccessCode = 200;
 
     /// <summary>
     /// 解析 <c>/fapi/v1/time</c> 的回應。
@@ -190,6 +197,227 @@ public static class BinanceResponseReader
             };
         }
     }
+
+    /// <summary>
+    /// 解析單張委託的回應(<c>POST</c>、<c>GET</c>、<c>DELETE</c> <c>/fapi/v1/order</c> 三者同形)。
+    /// Parses a single-order response; <c>POST</c>, <c>GET</c>, and <c>DELETE</c> on <c>/fapi/v1/order</c> all
+    /// share one shape.
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <param name="asOf">回應對應的時刻,用於補上缺漏的時間。The moment it describes.</param>
+    /// <returns>委託,或失敗原因。The order, or the reason it failed.</returns>
+    public static Result<Order> ReadOrder(string json, DateTimeOffset asOf)
+    {
+        var parsed = TryParse(json, BinanceApiPaths.Order);
+
+        if (!parsed.TryGetValue(out var document))
+        {
+            return parsed.ToFailure<Order>();
+        }
+
+        using (document)
+        {
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                ? ReadOrder(document.RootElement, asOf)
+                : BinanceErrors.MalformedResponse(
+                    "order 的回應不是 JSON 物件。The order response is not a JSON object.");
+        }
+    }
+
+    /// <summary>
+    /// 解析委託清單的回應(<c>GET /fapi/v1/openOrders</c>)。
+    /// Parses an order list response (<c>GET /fapi/v1/openOrders</c>).
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <param name="asOf">回應對應的時刻,用於補上缺漏的時間。The moment it describes.</param>
+    /// <returns>委託清單,或失敗原因。The orders, or the reason it failed.</returns>
+    public static Result<IReadOnlyList<Order>> ReadOrders(string json, DateTimeOffset asOf)
+    {
+        var parsed = TryParse(json, BinanceApiPaths.OpenOrders);
+
+        if (!parsed.TryGetValue(out var document))
+        {
+            return parsed.ToFailure<IReadOnlyList<Order>>();
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return BinanceErrors.MalformedResponse(
+                    "openOrders 的回應不是 JSON 陣列。The openOrders response is not a JSON array.");
+            }
+
+            var orders = new List<Order>(document.RootElement.GetArrayLength());
+
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                var order = ReadOrder(element, asOf);
+
+                if (!order.TryGetValue(out var value))
+                {
+                    return order.ToFailure<IReadOnlyList<Order>>();
+                }
+
+                orders.Add(value);
+            }
+
+            return Result.Success<IReadOnlyList<Order>>(orders);
+        }
+    }
+
+    /// <summary>
+    /// 檢查「只回報成敗、不回報內容」的端點回應是否真的成功(撤銷全部掛單、改槓桿、改保證金模式)。
+    /// Checks whether an acknowledgement-only response really succeeded: cancel-all, leverage, and margin mode.
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <param name="endpoint">端點路徑,用於錯誤附註。The endpoint path, recorded on any failure.</param>
+    /// <param name="endpoints">環境,用於錯誤附註。The environment, recorded on any failure.</param>
+    /// <returns>成功,或已對映的失敗。Success, or a mapped failure.</returns>
+    /// <remarks>
+    /// <para>
+    /// 這幾個端點成功時回的是 <c>{"code":200,"msg":"success"}</c> —— 本文裡確實有一個 <c>code</c> 欄位,
+    /// 但 200 在這裡代表成功而不是錯誤。不特別判斷這個值,就得讓 HTTP 狀態碼一個人扛全部的判斷;
+    /// 多檢查一次的成本是幾微秒,漏掉的成本是「以為撤乾淨了、其實沒有」,然後帶著殘留掛單去平倉。
+    /// A success from these endpoints reads <c>{"code":200,"msg":"success"}</c>: the body does carry a
+    /// <c>code</c>, but 200 there means success rather than an error. Without checking it the HTTP status
+    /// carries the whole judgement alone, and the cost of being wrong is believing the book is clear and then
+    /// closing a position with orders still resting on it.
+    /// </para>
+    /// <para>
+    /// 沒有 <c>code</c> 欄位的本文(例如改槓桿回的 <c>{"leverage":10,...}</c>)一律視為成功:
+    /// 走到這裡代表 HTTP 已經是 2xx,而那份回應沒有任何表示失敗的內容。
+    /// A body without a <c>code</c> — the leverage endpoint's <c>{"leverage":10,...}</c>, for instance — counts
+    /// as success: reaching here means the HTTP status was already 2xx and the body says nothing to the contrary.
+    /// </para>
+    /// </remarks>
+    public static Result ReadAcknowledgement(string json, string endpoint, BinanceEndpoints? endpoints = null)
+    {
+        // 本文空白視為成功:HTTP 狀態碼已經表態,而空本文不帶任何相反的訊息。
+        // An empty body counts as success: the status code has already spoken and an empty body says nothing
+        // that contradicts it.
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return Result.Success();
+        }
+
+        return !BinanceErrorMapper.TryParseApiError(json, out var apiCode, out var apiMessage)
+            || apiCode == BinanceSuccessCode
+                ? Result.Success()
+                : BinanceErrorMapper.Map(apiCode, apiMessage, endpoint, endpoints);
+    }
+
+    private static Result<Order> ReadOrder(JsonElement element, DateTimeOffset asOf)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return BinanceErrors.MalformedResponse(
+                "委託清單的元素不是 JSON 物件。An element of the order list is not a JSON object.");
+        }
+
+        if (!BinanceJson.TryGetString(element, "symbol", out var symbol))
+        {
+            return BinanceErrors.MissingField("symbol", BinanceApiPaths.Order);
+        }
+
+        if (!BinanceJson.TryGetString(element, "clientOrderId", out var clientOrderId))
+        {
+            return BinanceErrors.MissingField("clientOrderId", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var statusText = BinanceJson.TryGetString(element, "status", out var readStatus) ? readStatus : null;
+        var status = BinanceOrderMapper.ParseOrderStatus(statusText);
+
+        if (status == OrderStatus.Unspecified)
+        {
+            // 對不上的狀態不放行。既不算在簿上、也不算終態的委託,會讓部位追蹤永遠等不到結局。
+            // An unmapped status is not let through: an order that counts as neither live nor final leaves
+            // position tracking waiting for an outcome that never arrives.
+            return BinanceErrors.MalformedResponse(
+                    $"{symbol} 的委託狀態「{statusText}」無法對映到任何已知狀態。The order status \"{statusText}\" on {symbol} maps to no known state.")
+                .WithData(BinanceErrorDataKeys.Field, "status")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var sideText = BinanceJson.TryGetString(element, "side", out var readSide) ? readSide : null;
+        var side = BinanceOrderMapper.ParseOrderSide(sideText);
+
+        if (side == OrderSide.Unspecified)
+        {
+            // 方向對不上同樣不放行。方向是「這張單會開出什麼部位」的全部資訊,猜錯就是反向部位。
+            // An unmapped side is refused too: the side is the whole answer to which position this order
+            // creates, and guessing wrong is an inverted position.
+            return BinanceErrors.MalformedResponse(
+                    $"{symbol} 的買賣方向「{sideText}」無法對映。The order side \"{sideText}\" on {symbol} maps to nothing.")
+                .WithData(BinanceErrorDataKeys.Field, "side")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, "origQty", out var quantity))
+        {
+            return BinanceErrors.MissingField("origQty", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var updatedAt = BinanceJson.TryGetTimestamp(element, "updateTime", out var updateTime) ? updateTime : asOf;
+
+        return new Order
+        {
+            Symbol = symbol,
+            ClientOrderId = clientOrderId,
+
+            // orderId 是數值,中立模型卻用字串裝 —— 別的交易所的訂單編號不一定是數字。
+            // The id is numeric here while the neutral model stores a string, because other exchanges do not
+            // necessarily use numbers.
+            ExchangeOrderId = BinanceJson.TryGetInt64(element, "orderId", out var orderId)
+                ? orderId.ToString(CultureInfo.InvariantCulture)
+                : null,
+            Side = side,
+
+            // origType 是「當初送出的類型」。條件單觸發之後 type 會變成實際掛出去的那一種,
+            // 拿它回報等於把使用者下的 STOP_MARKET 說成 MARKET。
+            // origType is the type as submitted. Once a conditional order triggers, type becomes whatever was
+            // actually placed, and reporting that turns the caller's STOP_MARKET into a MARKET.
+            OrderType = BinanceOrderMapper.ParseOrderType(ReadOrderTypeText(element)),
+            Status = status,
+            PositionSide = BinanceOrderMapper.ParsePositionSide(
+                BinanceJson.TryGetString(element, "positionSide", out var positionSide) ? positionSide : null),
+            TimeInForce = BinanceOrderMapper.ParseTimeInForce(
+                BinanceJson.TryGetString(element, "timeInForce", out var timeInForce) ? timeInForce : null),
+            Quantity = quantity,
+            FilledQuantity = BinanceJson.TryGetDecimal(element, "executedQty", out var executed) ? executed : 0m,
+            AverageFillPrice = BinanceJson.TryGetDecimal(element, "avgPrice", out var averagePrice) ? averagePrice : 0m,
+
+            // 幣安對「沒有這個價格」的表示是 0,不是省略欄位。市價單的 price 就是 "0",
+            // 照抄下去會讓上層看到一張「限價零元」的委託。
+            // Binance writes "no such price" as 0 rather than omitting the field: a market order's price is
+            // "0", and copying that through shows the caller an order priced at zero.
+            Price = ReadOptionalPrice(element, "price"),
+            StopPrice = ReadOptionalPrice(element, "stopPrice"),
+            ReduceOnly = BinanceJson.TryGetBoolean(element, "reduceOnly", out var reduceOnly) && reduceOnly,
+            ClosePosition = BinanceJson.TryGetBoolean(element, "closePosition", out var closePosition) && closePosition,
+            FilledNotional = BinanceJson.TryGetDecimal(element, "cumQuote", out var cumQuote) ? cumQuote : 0m,
+
+            // 下單的回應只有 updateTime,查單的回應才另外帶 time。沒有 time 時以 updateTime 充當建立時間:
+            // 那是這張單目前唯一知道的時刻,好過填一個 default(DateTimeOffset) 的西元 0001 年。
+            // The place-order reply carries only updateTime while the query reply adds time. Without time the
+            // update time stands in, being the only instant known about this order, which beats a year-0001 default.
+            CreatedAt = BinanceJson.TryGetTimestamp(element, "time", out var createdAt) ? createdAt : updatedAt,
+            UpdatedAt = updatedAt,
+        };
+    }
+
+    private static string? ReadOrderTypeText(JsonElement element)
+    {
+        if (BinanceJson.TryGetString(element, "origType", out var origType))
+        {
+            return origType;
+        }
+
+        return BinanceJson.TryGetString(element, "type", out var type) ? type : null;
+    }
+
+    private static decimal? ReadOptionalPrice(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetDecimal(element, propertyName, out var value) && value > 0m ? value : null;
 
     private static Result<Balance> ReadBalance(JsonElement element)
     {

@@ -19,11 +19,12 @@
 | 唯讀的帳戶與持倉查詢 | 已完成 |
 | 幣安錯誤碼對映,含暫時性判定 | 已完成 |
 | 請求權重表與限流 | 已完成 |
-| 下單、撤單、查單、改槓桿與保證金模式 | 下一階段 |
+| 下單、撤單、撤銷全部掛單、查單、查未結委託 | 已完成 |
+| 改槓桿與保證金模式 | 已完成 |
+| 條件單(停損、停利、移動停損)的參數對映 | 已完成,但端點已不受理(見下方) |
 | WebSocket 行情與使用者資料串流 | 下一階段 |
 
-因此用戶端目前實作的是 `IExchangeInfoProvider`,等交易方法補上之後才會擴充成完整的 `IExchangeClient`。
-現有的方法簽章都不會變。
+用戶端已實作完整的 `IExchangeClient`。所有價格、數量與金額都是 `decimal`,所有時間都是 UTC。
 
 ## 安裝
 
@@ -62,6 +63,38 @@ var sized = rules.NormalizeOrderSize(price: 62_800m, quantity: 0.0123456m);
 ```
 
 公開端點不需要憑證,所以不填金鑰也能讀交易規則。
+
+送單的樣子:
+
+```csharp
+var request = new OrderRequest
+{
+    Symbol = "BTCUSDT",
+    Side = OrderSide.Buy,
+    OrderType = OrderType.Limit,
+    Quantity = 0.01m,
+    Price = 60_000m,
+
+    // 冪等識別碼。留白時由套件產生,但自己給的話,送單「之前」就能寫進自己的委託紀錄 ——
+    // 那是逾時之後唯一查得回那張單的方式。
+    ClientOrderId = BinanceClientOrderId.Generate(),
+};
+
+var placed = await client.PlaceOrderAsync(request);
+
+if (!placed.TryGetValue(out var order))
+{
+    // 逾時或失敗都不可以重送:先用 clientOrderId 查單確認那張單到底進去了沒有。
+    placed.Error!.TryGetData(BinanceErrorDataKeys.ClientOrderId, out var clientOrderId);
+    logger.LogError("送單失敗,請用 {ClientOrderId} 查單確認:{Error}", clientOrderId, placed.Error);
+    return;
+}
+
+await client.CancelOrderAsync(order.Symbol, order.GetIdentifier());
+```
+
+價量不必自己先校正:`PlaceOrderAsync` 會取該商品的交易規則,把數量向下對齊步進、價格對齊跳動點,
+並在校正後低於最小下單量或最小名目價值時直接失敗,不送出去換一次拒單。
 
 ## 幾個值得知道的設計決定
 
@@ -137,15 +170,94 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 帳戶端點自己的 `positions[]` 沒有 `markPrice` 也沒有 `liquidationPrice`,
 照它建出來的 `Position` 名目價值會是零 —— 而「名目價值為零」在風控眼中等於「沒有部位風險」。
 
+### 下單絕不重試,其餘都可以
+
+這是整個套件最不能妥協的一條。**逾時不代表對方沒收到** —— 那張單可能已經在簿上,甚至已經成交,
+只是回應在路上掉了。這時重送會開出兩倍的部位,那是真金白銀的損失。
+
+因此 `PlaceOrderAsync` 送出的請求同時做兩件事:以 `AsNonIdempotent()` 標記,並額外釘上
+`RetryPolicy.NoRetry`。兩道防線是刻意的 —— 標記擋的是 `Ozakboy.Http` 的重試處理器,
+策略擋的是「有人把預設策略換成一個看什麼都重試的 predicate」。
+
+其餘的都是冪等的,可以安全重試:
+
+| 操作 | 可否重試 | 理由 |
+| --- | --- | --- |
+| `PlaceOrderAsync` | **否** | 逾時後重送 = 兩張單、兩倍部位 |
+| `CancelOrderAsync` | 是 | 重複撤同一張單只會得到 `-2011`,意思是「它已經不在簿上了」 |
+| `CancelAllOrdersAsync` | 是 | 沒有掛單可撤也算成功 |
+| `GetOrderAsync` / `GetOpenOrdersAsync` | 是 | 查詢重送最壞只是多花一次權重 |
+| `SetLeverageAsync` | 是 | 設成已經是的值不會出錯 |
+| `SetMarginModeAsync` | 是 | 重送換來的 `-4046` 已被當成成功 |
+
+### `clientOrderId` 是逾時之後唯一的線索,所以成功失敗都帶得回來
+
+每張單都帶 `newClientOrderId`;呼叫端沒指定時由 `BinanceClientOrderId` 產生一個。
+重點在於它**失敗時也回得來** —— 成功時在 `Order.ClientOrderId`,失敗時在
+`Error.Data` 的 `BinanceErrorDataKeys.ClientOrderId` 鍵,而且訊息裡也寫著。
+
+少了這一項,自動產生的編號會隨著失敗一起消失,那張單就成了一個既查不到也撤不掉的部位。
+要更保險,請在送單**之前**自行呼叫 `BinanceClientOrderId.Generate()` 並寫進自己的委託紀錄。
+
+### 參數按類型加入,不是全部加入再清掉
+
+幣安對「哪些參數該出現」比抽象層嚴格得多:每個 `type` 有自己的必填集合,而**多送**一個
+不屬於該類型的參數同樣會被拒(`-1106`)。因此 `BinanceOrderMapper` 是逐型別按需加入 ——
+全部加入再清掉的寫法只要漏清一個就是一張被拒的單,而拒單訊息不會告訴你是哪一個參數多了。
+
+對映表:
+
+| 抽象層類型 | 幣安 `type` | 必帶參數 |
+| --- | --- | --- |
+| `Limit` | `LIMIT` | `quantity`、`price`、`timeInForce` |
+| `Market` | `MARKET` | `quantity`(不可帶 `price` 或 `timeInForce`) |
+| `StopMarket` | `STOP_MARKET` | `stopPrice` 加 `quantity` 或 `closePosition` |
+| `StopLimit` | `STOP` | `quantity`、`price`、`stopPrice`、`timeInForce` |
+| `TakeProfitMarket` | `TAKE_PROFIT_MARKET` | `stopPrice` 加 `quantity` 或 `closePosition` |
+| `TakeProfitLimit` | `TAKE_PROFIT` | `quantity`、`price`、`stopPrice`、`timeInForce` |
+| `TrailingStopMarket` | `TRAILING_STOP_MARKET` | `quantity`、`callbackRate`(0.1 至 10) |
+
+幾個必須逐字照抄、不能照語意改寫的字面值:停損限價單是 `STOP` 而不是 `STOP_LIMIT`;
+「最新成交價」是 `CONTRACT_PRICE` 而不是 `LAST_PRICE`;全倉在**寫入**時是 `CROSSED`,
+但持倉查詢**讀回來**的 `marginType` 是小寫的 `cross`。
+
+本套件另外補上幾條幣安比抽象層更嚴的規則,全部在本地擋下:`clientOrderId` 的格式與 36 字上限、
+`closePosition` 只能用於市價型條件單、雙向模式不可帶 `reduceOnly`、
+移動停損的回撤比例上限是 10 而不是抽象層允許的 100。
+
+### 條件單目前不被 `/fapi/v1/order` 受理(`-4120`)
+
+2026-09-11 在 Testnet 實測:`STOP_MARKET` 與 `TRAILING_STOP_MARKET` 送到 `/fapi/v1/order`
+會得到 `-4120 Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.`
+
+參數的組法本身沒有錯,是**端點**變了。因此這一碼對映成 `TradeErrorCodes.NotSupported` 而不是
+「參數錯誤」—— 後者會讓人回頭反覆檢查參數,而參數再怎麼改都不會讓這個端點接受它。
+條件單的參數對映已經寫好也測過,但**端到端只驗到「被這個端點拒絕」**;
+真正要下條件單需要接 Algo Order 端點,那不在本階段的範圍內。
+
+### 數量一律向下對齊
+
+送單前一律以該商品的交易規則在本地校正:數量向下對齊步進、價格對齊跳動點。
+向上對齊會讓實際部位大於風控算出來的規模,那是風控破口而不是四捨五入問題。
+
+校正後低於最小下單量或最小名目價值時,直接回傳失敗而不是送出去被拒 ——
+省的不只是一趟往返,還有一份限流額度。
+
 ## 測試
 
-合約測試以錄製的回應重播,全程不連網。`exchangeInfo` 與 `time` 的 fixture 是公開端點的真實錄製;
-帳戶與持倉的 fixture 是依官方文件手寫的,因為那些端點需要真實憑證。
-`tests/.../Fixtures/PROVENANCE.md` 明白寫出哪一份是哪一種,以及為什麼這個差別有實質風險。
+合約測試以錄製的回應重播,全程不連網。**所有 fixture 都是真實錄製的**:
+`exchangeInfo` 與 `time` 來自公開端點,帳戶、持倉與委託的回應來自 2026-09-11 對 Testnet 的實際簽章請求。
+`tests/.../Fixtures/PROVENANCE.md` 寫明每一份的來源端點、取得日期與裁切內容,
+也說明其中兩份 `-open` 檔案為什麼是「實錄結構、替換數值」而非逐字實錄。
 
 需要真實 Testnet 憑證的整合測試標記 `[TestCategory("Testnet")]`,
 從環境變數 `BINANCE_TESTNET_API_KEY` 與 `BINANCE_TESTNET_API_SECRET` 讀取憑證。
 沒有憑證時回報 Inconclusive 而不是通過:一個「沒跑但綠燈」的測試比沒有測試更危險。
+
+這些測試會**實際送單**,因此只打 Testnet,主網的交易端點在任何情況下都不碰。
+測試單的紀律是:掛在標記價下方約 4% 且用 GTC,所以不會成交;每一張都在 `finally` 裡撤掉,
+即使斷言失敗也一樣;每一張都帶 `pulsetrade-test-` 前綴,萬一留下來看得出來源;
+收尾另有一條測試與一段 `ClassCleanup` 查詢**全部商品**的掛單,確認沒有殘留。
 
 ```
 dotnet test                                    # 離線合約測試

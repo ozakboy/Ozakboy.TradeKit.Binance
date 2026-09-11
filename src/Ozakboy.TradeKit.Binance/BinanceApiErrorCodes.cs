@@ -254,6 +254,23 @@ public static class BinanceApiErrorCodes
     /// <summary>-4068 POSITION_SIDE_CHANGE_EXISTS_QUANTITY:有持倉,無法變更持倉模式。Cannot change position side with an existing position.</summary>
     public const int PositionModeChangeBlockedByPosition = -4068;
 
+    /// <summary>
+    /// -4120:這個端點不接受該委託類型,幣安要求改用 Algo Order 專用端點。
+    /// The endpoint does not accept this order type; Binance directs the caller to the Algo Order endpoints.
+    /// </summary>
+    /// <remarks>
+    /// 2026-09-11 在 Testnet 實測確認:<c>STOP_MARKET</c> 與 <c>TRAILING_STOP_MARKET</c> 送到
+    /// <c>/fapi/v1/order</c> 會得到這一碼。條件單參數的組法本身沒錯,是<b>端點</b>變了。
+    /// 對映成 <see cref="TradeErrorCodes.NotSupported"/> 而不是 <see cref="TradeErrorCodes.InvalidOrderRequest"/>:
+    /// 後者會讓人回頭反覆檢查參數,而參數再怎麼改都不會讓這個端點接受它。
+    /// Confirmed against Testnet on 2026-09-11: <c>STOP_MARKET</c> and <c>TRAILING_STOP_MARKET</c> sent to
+    /// <c>/fapi/v1/order</c> earn this code. The conditional parameter set itself is correct; the
+    /// <b>endpoint</b> changed. It maps to <see cref="TradeErrorCodes.NotSupported"/> rather than
+    /// <see cref="TradeErrorCodes.InvalidOrderRequest"/>, because the latter sends the reader back to inspect
+    /// arguments that no amount of editing will make this endpoint accept.
+    /// </remarks>
+    public const int OrderTypeNotSupportedOnEndpoint = -4120;
+
     /// <summary>-4131 MARKET_ORDER_REJECT:對手方最佳價不符合篩選器。The counterparty's best price does not meet the filter.</summary>
     public const int MarketOrderRejected = -4131;
 
