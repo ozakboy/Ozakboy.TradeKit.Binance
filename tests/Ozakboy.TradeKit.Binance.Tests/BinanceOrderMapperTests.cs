@@ -272,12 +272,30 @@ public sealed class BinanceOrderMapperTests
     // ── 幣安專屬的驗證 / The Binance-only validation ──────────────────────────
 
     [TestMethod]
-    public void TheCallbackRateBoundsAreBinancesOwnNotTheAbstractions()
+    [DataRow(0.1, true)]
+    [DataRow(10.0, true)]
+    [DataRow(5.0, true)]
+    [DataRow(0.09, false)]
+    [DataRow(10.01, false)]
+    [DataRow(100.0, false)]
+    public void TheCallbackRateBoundsAreBinancesOwnNotTheAbstractions(double rate, bool accepted)
     {
         // 抽象層允許 0 到 100(所有交易所的聯集),幣安只收 0.1 到 10。
-        // The abstraction allows 0 to 100, the union across exchanges; Binance takes 0.1 to 10.
-        Assert.AreEqual(0.1m, BinanceOrderMapper.MinCallbackRate);
-        Assert.AreEqual(10m, BinanceOrderMapper.MaxCallbackRate);
+        // 兩端都驗:只驗中間值的話,把上限寫成 100 的錯誤照樣會通過。
+        // The abstraction allows 0 to 100, the union across exchanges, while Binance takes 0.1 to 10. Both ends
+        // are asserted, because a ceiling mistakenly left at 100 still passes a test of the middle.
+        var request = new OrderRequest
+        {
+            Symbol = "BTCUSDT",
+            Side = OrderSide.Sell,
+            OrderType = OrderType.TrailingStopMarket,
+            Quantity = 1m,
+            CallbackRate = (decimal)rate,
+        };
+
+        var result = BinanceOrderMapper.ValidateForBinance(request, "ozk-1-aaaaaaaa");
+
+        Assert.AreEqual(accepted, result.IsSuccess, $"回撤比例 {rate} 的判定不如預期:{result.Error?.Message}");
     }
 
     [TestMethod]
