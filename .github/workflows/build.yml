@@ -31,7 +31,7 @@ jobs:
       # VSTest 那條路徑會遞移帶進第三方的 Newtonsoft.Json,違反本專案的相依政策)。
       # MTP 不認得 VSTest 的 --logger,產生 trx 的等效寫法是 --report-trx。
       - name: Test
-        run: dotnet test --configuration Release --no-build --verbosity normal --report-trx --report-trx-filename test-results.trx
+        run: dotnet test --configuration Release --no-build --verbosity normal --filter "TestCategory!=MainnetPublic" --report-trx --report-trx-filename test-results.trx
 
       - name: Upload test results
         if: always()

@@ -39,10 +39,12 @@ public sealed record BinanceEndpoints
     /// </summary>
     /// <remarks>
     /// REST 主機於 2026-09-11 實際呼叫 <c>/fapi/v1/exchangeInfo</c> 與 <c>/fapi/v1/time</c> 驗證可用。
-    /// WebSocket 主機取自官方文件,本版尚未實際連線驗證(本階段不實作行情串流)。
+    /// WebSocket 主機於 2026-09-12 經 <c>/market/stream</c> 實際收到公開行情驗證(不帶任何憑證);
+    /// 主網的 <c>/private</c> 使用者資料串流未實測 —— 本專案不使用主網憑證。
     /// The REST host was verified on 2026-09-11 by actually calling <c>/fapi/v1/exchangeInfo</c> and
-    /// <c>/fapi/v1/time</c>. The WebSocket host comes from the documentation and has not been dialled in this
-    /// release, which implements no market streams.
+    /// <c>/fapi/v1/time</c>. The WebSocket host was verified on 2026-09-12 by actually receiving public market data
+    /// on <c>/market/stream</c> with no credential at all; the production <c>/private</c> user data stream has not
+    /// been dialled, because this project uses no production credentials.
     /// </remarks>
     public static BinanceEndpoints Mainnet { get; } = new(
         "Binance USDⓈ-M Mainnet",
@@ -89,17 +91,19 @@ public sealed record BinanceEndpoints
     /// The WebSocket base address such as <c>wss://fstream.binance.com</c>, with no path.
     /// </summary>
     /// <remarks>
-    /// 行情串流(<see cref="BinanceMarketDataFeed"/>,走 <c>/stream</c>)與使用者資料串流
-    /// (<see cref="BinanceUserDataFeed"/>,走 <c>/ws/{listenKey}</c>)都從這個位址撥號。它與 REST 位址放在
+    /// 行情串流(<see cref="BinanceMarketDataFeed"/>,走 <c>/market/stream</c>)與使用者資料串流
+    /// (<see cref="BinanceUserDataFeed"/>,走 <c>/private/ws?listenKey=…</c>)都從這個位址撥號。它與 REST 位址放在
     /// 同一組端點裡,是為了讓兩種連線永遠指向同一個環境 —— 一旦分成兩處設定,「下單打 Testnet、
-    /// 帳戶事件卻從主網來」這種錯接就又變成可能。這裡只提供主機,路徑由各串流自己決定,
-    /// 見 <see cref="MarketData.BinanceStreamNames"/>。
-    /// Both the market streams (<see cref="BinanceMarketDataFeed"/>, on <c>/stream</c>) and the user data stream
-    /// (<see cref="BinanceUserDataFeed"/>, on <c>/ws/{listenKey}</c>) dial this address. It sits in the same set as
-    /// the REST address so that both kinds of connection always point at one environment: the moment there are two
-    /// places to configure, a mismatch such as orders on Testnet with account events from production becomes
-    /// possible again. Only the host is fixed here; each stream decides its own path — see
-    /// <see cref="MarketData.BinanceStreamNames"/>.
+    /// 帳戶事件卻從主網來」這種錯接就又變成可能。這裡只提供主機,路由與路徑由各串流自己接上,
+    /// 見 <see cref="MarketData.BinanceStreamNames"/>;以 <see cref="CreateOverride"/> 覆寫時同樣只給主機根位址
+    /// (或代理前綴),不要把 <c>/market</c> 之類的路由寫進來。
+    /// Both the market streams (<see cref="BinanceMarketDataFeed"/>, on <c>/market/stream</c>) and the user data
+    /// stream (<see cref="BinanceUserDataFeed"/>, on <c>/private/ws?listenKey=…</c>) dial this address. It sits in the
+    /// same set as the REST address so that both kinds of connection always point at one environment: the moment
+    /// there are two places to configure, a mismatch such as orders on Testnet with account events from production
+    /// becomes possible again. Only the host is fixed here; each stream appends its own route and path — see
+    /// <see cref="MarketData.BinanceStreamNames"/>. An override through <see cref="CreateOverride"/> likewise supplies
+    /// only the host root, or a proxy prefix, and never a route such as <c>/market</c>.
     /// </remarks>
     public Uri WebSocketBaseUri { get; }
 

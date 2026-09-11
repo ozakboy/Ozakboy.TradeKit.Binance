@@ -8,6 +8,87 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-09-12
+
+修正幣安合約 WebSocket 路由拆分造成的不相容:主網行情收不到任何資料,Testnet 的使用者資料串流收不到事件。
+公開 API 只有新增、沒有變更,升級不需要改呼叫端程式碼。
+Fixes the incompatibility with Binance's futures WebSocket route split: no market data on production, and no user
+data events on the testnet. The public API only gains members, so upgrading needs no caller changes.
+
+### 問題修正 / Fixed
+
+- **主網行情零資料的真正原因是路由拆分 / The real cause of no production market data is the route split**:
+  幣安把合約 WebSocket 拆成三條路由 —— `/public`(bookTicker、depth)、`/market`(kline、continuousKline、
+  markPrice、aggTrade、ticker、miniTicker、強平等)、`/private`(listenKey 使用者資料),沒帶路由前綴的舊位址
+  2026-04-23 起停用,只收得到 public 類資料
+  ([官方公告](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Important-WebSocket-Change-Notice))。
+  0.1.0 走不帶路由的 `/stream`,所以在主網上握手成功卻零資料。**0.1.0「已知限制」把這判為本機網路環境問題,
+  那個判斷是錯的。** 2026-09-12 主網實測:`/stream?streams=btcusdt@kline_1m/btcusdt@markPrice@1s`、
+  `/ws/btcusdt@kline_1m`、`/ws/btcusdt@markPrice@1s` 全部連得上、零 frame,`/market/stream…` 與 `/market/ws/…`
+  立刻有資料。`BinanceStreamNames.CombinedStreamUri` 改為產生 `{base}/market/stream`(簽章不變);
+  Testnet 對行情仍相容舊位址,但 `/market` 在兩個環境都通。另新增 `PublicRoute`、`MarketRoute`、`PrivateRoute`
+  常數 —— 日後加 bookTicker 或 depth 要走 `/public`,不是 `/market`。
+  The unprefixed addresses were retired on 2026-04-23 and deliver public-class data only; 0.1.0's "local network
+  problem" diagnosis was wrong. Market streams now dial `/market/stream`.
+
+- **Testnet 使用者資料串流在舊位址已收不到事件 / The testnet user data stream no longer delivers on the old
+  address**:2026-09-12 以同一把 listenKey 同時連兩條,0.1.0 撥的 `/ws/<listenKey>` 收到 0 則,`/private/…`
+  收到委託事件 —— 0.1.0 的使用者資料串流在 Testnet 上已經收不到事件(幾小時前還收得到)。
+  改撥官方文件的查詢字串形式 `{base}/private/ws?listenKey=<key>&events=ORDER_TRADE_UPDATE/ACCOUNT_UPDATE/MARGIN_CALL/listenKeyExpired`;
+  路徑形式 `/private/ws/<key>` 在 Testnet 也通,但文件沒寫,不採用。新增
+  `BinanceStreamNames.UserDataStreamUri(webSocketBaseUri, listenKey, events)`:憑證與每個事件名都以
+  `Uri.EscapeDataString` 編碼、憑證只出現在 `listenKey=` 查詢參數,端點覆寫的代理前綴照舊保留。
+  `RawStreamUri` 保留以相容既有 API,但本套件已不再使用它。
+  The 0.1.0 `/ws/<listenKey>` receives nothing on the testnet any more; the stream now dials the documented
+  `/private/ws?listenKey=…&events=…` form.
+
+- **`events` 的語意 / What `events` means**:它是**真的過濾器** —— 只帶 `events=ACCOUNT_UPDATE` 的連線收不到
+  `ORDER_TRADE_UPDATE`。事件名**不會被驗證**,夾一個不存在的名稱照樣連得上、照樣收到其他事件,拼錯只會安靜地收不到。
+  **省略 `events` 不可依賴**:兩次實測結果不一致(一次收到、一次 0 則)。因此事件清單一律明列,
+  而且直接引用解析器分派用的同一組常數(內部的 `BinanceUserDataPaths.StreamEvents`),不另寫一份字串;
+  `UserDataStreamUri` 拒絕空清單與空白名稱。
+  `events` really filters, names are not validated, and omitting it is unreliable — so the list is always explicit
+  and shares its constants with the reader.
+
+### 技術改進 / Changed
+
+- **心跳在新路由上重新實測 / Heartbeats re-measured on the new routes**:2026-09-12 以探針實測,
+  `LIST_SUBSCRIPTIONS` 在 Testnet 的 `/private/ws?listenKey=…&events=…` 上 46–120 ms 回覆,在 `/market/stream`
+  上 Testnet 65–77 ms、主網 58–78 ms 回覆,兩條串流的閒置偵測維持預設開啟。`/private` 上的回覆形狀變成
+  `{"result":["<listenKey>@ACCOUNT_UPDATE","<listenKey>@MARGIN_CALL",…],"id":N}`,每個元素仍帶著憑證;
+  解析器照舊一個字都不讀。事件名以斜線原樣相接或整段編碼成 `%2F`,伺服器都拆得出四個事件。
+  Both heartbeats still answer on the new routes, so idle detection stays on by default. The private reply now
+  lists `<listenKey>@<event>` entries, each still carrying the credential, and is still ignored unread.
+
+- **主網公開行情整合測試 / A production public market data test**:新增 `BinanceMarketDataMainnetPublicTests`,
+  標記 `[TestCategory("MainnetPublic")]`。以 `BinanceEnvironment.Mainnet`、不設任何憑證,經
+  `SubscribeKlinesAsync` 在 60 秒內收到至少一根 BTCUSDT 1m K 線。Testnet 對行情仍相容舊位址,
+  所以這是修正有效的唯一證據。以故意失敗驗證過:把 `CombinedStreamUri` 暫時改回 `/stream`,
+  這條測試在 60 秒後紅燈(零資料);改回 `/market/stream` 即綠。
+  The only evidence of the fix, since the testnet still honours the old address; verified by reverting to
+  `/stream` once and watching it go red.
+
+- **撥號位址有單元測試 / The dialled address is unit-tested**:假連線記下撥號位址,單元測試斷言使用者資料走
+  `/private/ws`、listenKey 只出現在 `listenKey=` 查詢參數一次、`events` 恰好是四個事件名(以常數比對)。
+  憑證外洩測試照舊全綠,並先確認 canary 確實就是撥號時用的那把憑證 —— 否則「沒出現」什麼也證明不了。
+  A test asserts the private route, a single occurrence of the credential in the query, and exactly the four event
+  names; the leak test still passes and now confirms its canary is the credential actually dialled.
+
+### 已知限制 / Known limitations
+
+- **`MARGIN_CALL` 與 `listenKeyExpired` 的實際推送未經實測**。這兩種事件在 Testnet 觸發不了(前者要逼近強平,
+  後者要讓憑證真的過期),名稱與官方文件一致、也已列進 `events`,但「交易所在新路由上真的會推送」這件事沒有驗到。
+  名稱不會被驗證,這一條要到真的發生時才會知道。
+  Neither event can be triggered on the testnet; the names match the documentation and are subscribed, but actual
+  delivery on the new route is unverified.
+
+- **主網的使用者資料串流未實測**。本專案禁止使用主網憑證,主網的 `/private` 路由只依官方文件與 Testnet 的行為。
+  The production user data stream has not been dialled; this project uses no production credentials.
+
+- 0.1.0 的其餘已知限制仍然適用;其中「主網的行情串流尚未實際連線驗證」一條已由本版的主網公開行情測試解除。
+  The other 0.1.0 limitations still apply, except the unverified production market stream, which this release
+  verifies.
+
 ## [0.1.0] - 2026-09-12
 
 首個發佈版本。幣安 USDⓈ-M 永續合約的完整用戶端:交易規則與帳戶查詢、下單撤單查單與槓桿／保證金模式、
@@ -286,4 +367,5 @@ data stream — built on `Ozakboy.Http` and `Ozakboy.WebSockets` with no third-p
   填進去等於用錯的值冒充事實。下一階段接上 `leverageBracket` 後補齊。
   `exchangeInfo` does not carry a leverage ceiling, and deriving one would pass a wrong number off as fact.
 
+[0.1.1]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.0

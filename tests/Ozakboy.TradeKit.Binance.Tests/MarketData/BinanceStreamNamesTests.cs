@@ -109,11 +109,17 @@ public sealed class BinanceStreamNamesTests
     }
 
     [TestMethod]
-    public void CombinedStreamUriAppendsTheVerifiedPath()
+    public void CombinedStreamUriDialsTheMarketRoute()
     {
+        // 不帶路由的 /stream 在主網上握手成功、零資料(2026-09-12 實測),K 線與標記價屬 market 類。
+        // The unprefixed /stream completes the handshake on production and delivers nothing (measured on
+        // 2026-09-12); klines and mark prices are market-class data.
         var uri = BinanceStreamNames.CombinedStreamUri(BinanceEndpoints.Testnet.WebSocketBaseUri);
 
-        Assert.AreEqual("wss://stream.binancefuture.com/stream", uri.AbsoluteUri);
+        Assert.AreEqual("wss://stream.binancefuture.com/market/stream", uri.AbsoluteUri);
+        Assert.AreEqual(
+            "wss://fstream.binance.com/market/stream",
+            BinanceStreamNames.CombinedStreamUri(BinanceEndpoints.Mainnet.WebSocketBaseUri).AbsoluteUri);
     }
 
     [TestMethod]
@@ -124,7 +130,7 @@ public sealed class BinanceStreamNamesTests
         // dial somewhere else.
         var uri = BinanceStreamNames.CombinedStreamUri(new Uri("wss://proxy.example/binance", UriKind.Absolute));
 
-        Assert.AreEqual("wss://proxy.example/binance/stream", uri.AbsoluteUri);
+        Assert.AreEqual("wss://proxy.example/binance/market/stream", uri.AbsoluteUri);
     }
 
     [TestMethod]
@@ -132,7 +138,99 @@ public sealed class BinanceStreamNamesTests
     {
         var uri = BinanceStreamNames.CombinedStreamUri(new Uri("wss://proxy.example/binance/", UriKind.Absolute));
 
-        Assert.AreEqual("wss://proxy.example/binance/stream", uri.AbsoluteUri);
+        Assert.AreEqual("wss://proxy.example/binance/market/stream", uri.AbsoluteUri);
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriUsesThePrivateRouteAndTheDocumentedQueryForm()
+    {
+        var uri = BinanceStreamNames.UserDataStreamUri(
+            BinanceEndpoints.Testnet.WebSocketBaseUri,
+            "abc123",
+            ["ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE"]);
+
+        Assert.AreEqual(
+            "wss://stream.binancefuture.com/private/ws?listenKey=abc123&events=ORDER_TRADE_UPDATE/ACCOUNT_UPDATE",
+            uri.AbsoluteUri);
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriKeepsTheCredentialOutOfThePath()
+    {
+        // 文件沒寫的 /private/ws/<listenKey> 也連得上,但這裡用文件的查詢字串形式。
+        // The undocumented /private/ws/<listenKey> also connects, but the documented query form is what is used.
+        var uri = BinanceStreamNames.UserDataStreamUri(
+            BinanceEndpoints.Testnet.WebSocketBaseUri,
+            "abc123",
+            ["ORDER_TRADE_UPDATE"]);
+
+        Assert.AreEqual("/private/ws", uri.AbsolutePath);
+        Assert.DoesNotContain("abc123", uri.AbsolutePath, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriEscapesTheCredentialAndEachEventName()
+    {
+        // 憑證若含 + / = 之類的字元,不編碼就會被伺服器讀成別的東西(+ 變空白、& 切斷參數)。
+        // A credential holding + / = and the like would otherwise be read as something else by the server — a
+        // + turning into a space, an & cutting the parameter short.
+        var uri = BinanceStreamNames.UserDataStreamUri(
+            BinanceEndpoints.Testnet.WebSocketBaseUri,
+            "a+b/c=d&e",
+            ["ORDER TRADE", "ACCOUNT_UPDATE"]);
+
+        Assert.AreEqual(
+            "wss://stream.binancefuture.com/private/ws?listenKey=a%2Bb%2Fc%3Dd%26e&events=ORDER%20TRADE/ACCOUNT_UPDATE",
+            uri.AbsoluteUri);
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriKeepsAnExistingPathPrefix()
+    {
+        var uri = BinanceStreamNames.UserDataStreamUri(
+            new Uri("wss://proxy.example/binance/", UriKind.Absolute),
+            "abc123",
+            ["ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE"]);
+
+        Assert.AreEqual(
+            "wss://proxy.example/binance/private/ws?listenKey=abc123&events=ORDER_TRADE_UPDATE/ACCOUNT_UPDATE",
+            uri.AbsoluteUri);
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriRejectsAnEmptyEventList()
+    {
+        // 省略 events 的連線收不收得到事件實測不一致,不可依賴,所以空清單在組位址時就擋下。
+        // 例外訊息也不可以帶出憑證。
+        // Whether a connection without events receives anything proved inconsistent, so an empty list is
+        // refused when the address is built — and the exception must not carry the credential either.
+        var thrown = Assert.ThrowsExactly<ArgumentException>(
+            () => BinanceStreamNames.UserDataStreamUri(BinanceEndpoints.Testnet.WebSocketBaseUri, "secret-key-123", []));
+
+        Assert.DoesNotContain("secret-key-123", thrown.Message, StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriRejectsABlankEventName()
+    {
+        Assert.ThrowsExactly<ArgumentException>(
+            () => BinanceStreamNames.UserDataStreamUri(
+                BinanceEndpoints.Testnet.WebSocketBaseUri,
+                "abc123",
+                ["ORDER_TRADE_UPDATE", " "]));
+    }
+
+    [TestMethod]
+    public void UserDataStreamUriRejectsABlankCredentialAndNullArguments()
+    {
+        Assert.ThrowsExactly<ArgumentException>(
+            () => BinanceStreamNames.UserDataStreamUri(BinanceEndpoints.Testnet.WebSocketBaseUri, "  ", ["A"]));
+
+        Assert.ThrowsExactly<ArgumentNullException>(
+            () => BinanceStreamNames.UserDataStreamUri(null!, "abc123", ["A"]));
+
+        Assert.ThrowsExactly<ArgumentNullException>(
+            () => BinanceStreamNames.UserDataStreamUri(BinanceEndpoints.Testnet.WebSocketBaseUri, "abc123", null!));
     }
 
     [TestMethod]

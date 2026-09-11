@@ -64,14 +64,27 @@ namespace Ozakboy.TradeKit.Binance;
 /// <b>串流憑證是祕密。</b> listenKey 能連上這個帳戶的私有資料,因此它不會出現在任何錯誤訊息、
 /// <see cref="Error.Data"/>、例外訊息或串流識別字裡。診斷資料用的是固定字面值
 /// <c>userDataStream</c>,不是位址;連 <c>listenKeyExpired</c> 事件的原文都不會被轉述,
-/// 因為那則訊息本體就帶著憑證。心跳回覆也一樣:<c>LIST_SUBSCRIPTIONS</c> 的回覆就是
-/// <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>,解析器認出它之後連讀都不讀。
+/// 因為那則訊息本體就帶著憑證。心跳回覆也一樣:在 <c>/private</c> 路由上,<c>LIST_SUBSCRIPTIONS</c> 的回覆是
+/// <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c>(2026-09-12 Testnet 實測,每個元素都帶著憑證),
+/// 解析器認出它之後連讀都不讀。
 /// <b>The stream credential is a secret.</b> A listenKey reaches this account's private data, so it appears in
 /// no error message, no <see cref="Error.Data"/>, no exception text, and no stream identifier. Diagnostics use
 /// the fixed literal <c>userDataStream</c> rather than the address, and not even the text of a
 /// <c>listenKeyExpired</c> frame is relayed, because that frame carries the credential itself. The same goes for
-/// heartbeat replies: the answer to <c>LIST_SUBSCRIPTIONS</c> is <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>,
-/// and once the reader recognises one it does not so much as look inside.
+/// heartbeat replies: on the <c>/private</c> route the answer to <c>LIST_SUBSCRIPTIONS</c> is
+/// <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c> — measured on the testnet on 2026-09-12, every
+/// element carrying the credential — and once the reader recognises one it does not so much as look inside.
+/// </para>
+/// <para>
+/// <b>撥號位址是 <c>{WebSocketBaseUri}/private/ws?listenKey=…&amp;events=…</c>。</b> 事件清單取自
+/// <see cref="BinanceUserDataPaths.StreamEvents"/>,與解析器分派用的是同一組常數。<c>events</c> 是真的過濾器,
+/// 名稱又不會被驗證,漏列或拼錯的後果是那一類事件安靜地永遠不來;位址組法與依據見
+/// <see cref="BinanceStreamNames.UserDataStreamUri"/>。
+/// <b>The address is <c>{WebSocketBaseUri}/private/ws?listenKey=…&amp;events=…</c>.</b> The event list comes from
+/// <see cref="BinanceUserDataPaths.StreamEvents"/>, the same constants the reader dispatches on. <c>events</c>
+/// really filters and its names are not validated, so an omission or a misspelling makes that kind of event
+/// silently never arrive; see <see cref="BinanceStreamNames.UserDataStreamUri"/> for how the address is built
+/// and why.
 /// </para>
 /// <para>
 /// <b>存活偵測靠心跳。</b> 帳戶可以合理地安靜好幾個小時,所以單靠「多久沒收到訊息」會把健康的連線判死。
@@ -473,12 +486,20 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
 
         _credentialCreated = true;
 
-        // 位址含憑證,所以這個 Uri 本身也是祕密。Ozakboy.WebSockets 0.2.1 只把 authority 寫進日誌,
-        // 而這一層產生的每一筆錯誤都由 BinanceUserDataErrors 負責,不會帶上位址。
+        // 走 /private 路由,憑證放在 listenKey= 查詢參數,並明列要收的事件。0.1.0 撥的 /ws/{listenKey}
+        // 在 Testnet 上已經收不到任何事件;events 省略時是否收得到實測不一致,所以一律明列。
+        // 位址含憑證,所以這個 Uri 本身也是祕密。Ozakboy.WebSockets 0.2.1 只把 authority 寫進日誌
+        // (查詢字串與路徑一樣不寫),而這一層產生的每一筆錯誤都由 BinanceUserDataErrors 負責,不會帶上位址。
+        // The stream dials the /private route with the credential in the listenKey= query and the wanted events
+        // listed explicitly. The 0.1.0 address, /ws/{listenKey}, no longer delivers any event on the testnet, and
+        // whether an address without events receives anything proved inconsistent, so they are always listed.
         // The address embeds the credential, so the Uri is a secret too. Ozakboy.WebSockets 0.2.1 logs only the
-        // authority, and every error this layer produces goes through BinanceUserDataErrors, which never
-        // carries the address.
-        var uri = BinanceStreamNames.RawStreamUri(_endpoints.WebSocketBaseUri, listenKey);
+        // authority — neither the query nor the path — and every error this layer produces goes through
+        // BinanceUserDataErrors, which never carries the address.
+        var uri = BinanceStreamNames.UserDataStreamUri(
+            _endpoints.WebSocketBaseUri,
+            listenKey,
+            BinanceUserDataPaths.StreamEvents);
         var options = _streamOptions.CreateWebSocketOptions(uri, NextKeepAlivePayload);
         var validation = options.Validate();
 

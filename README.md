@@ -146,6 +146,11 @@ jitter, subscription replay after a reconnect, idle-timeout liveness detection, 
 here. What this package owns is the Binance protocol: stream names, the path to dial, the envelope, and the
 abbreviated field names.
 
+Binance splits its futures WebSockets into three routes by kind of data: market data (klines, mark prices) on
+`/market`, user data on `/private`, and order-book data (bookTicker, depth) on `/public`. The package appends the
+route itself, so an endpoint override (`BinanceEndpoints.CreateOverride`) pointing at a proxy or a replay server
+should supply the **host root**, or a proxy prefix, and never a route such as `/market`.
+
 Tuning lives on `BinanceMarketStreamOptions`: the heartbeat interval, the idle timeout, the reconnect ceiling,
 the queue capacity and backpressure strategy, and whether mark prices use the one-second stream.
 
@@ -398,18 +403,30 @@ candle is usually still ticking. `IsClosed` is derived there by comparing the cl
 time source. Treating the whole list as closed records "the latest price when the query ran" as a close, and
 stored as history that makes later backtests run on a candle that never existed.
 
-### The stream path is the one that was measured, not the one in the documentation
+### Routes follow the official notice, and were verified on production
 
-Dialling `wss://stream.binancefuture.com/stream` and subscribing with a `SUBSCRIBE` control message was
-verified on 2026-09-11 by actually receiving data. The `/public/ws/…` and `/public/stream…` forms carried by
-the current documentation page behave in that environment in the worst possible way: the handshake succeeds,
-the `SUBSCRIBE` is even acknowledged with `{"result":null,"id":1}`, and no market data ever arrives. No error,
-no disconnect, just a price that never moves. The verified paths are therefore hard-coded rather than
-assembled from configuration.
+Binance splits its futures WebSockets into three routes, `/public`, `/market`, and `/private`
+([official notice](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Important-WebSocket-Change-Notice)).
+The old addresses without a route prefix were retired on 2026-04-23 and deliver public-class data only. They fail
+in the worst possible way: measured on production on 2026-09-12, klines and mark prices on the unprefixed
+`/stream` and `/ws/…` complete the handshake and then deliver not one frame. No error, no disconnect, just a price
+that never moves. That is why 0.1.0 received nothing on production, which was misread at the time as a local
+network problem. The testnet still honours the old addresses for market data, so testnet checks alone cannot
+catch this, and a separate test connects to production public market data only. Routes and paths are
+hard-coded rather than assembled from configuration.
 
-Two more measured details. The envelope follows the **path**, not the number of streams: `/stream` wraps every
-frame in `{"stream":…,"data":…}` even for a single subscription, while `/ws` wraps none even for ten. And the
+Two more measured details. The envelope follows the **path**, not the number of streams: `…/stream` wraps every
+frame in `{"stream":…,"data":…}` even for a single subscription, while `…/ws` wraps none even for ten. And the
 separator inside `streams=` must be a slash; a comma fails the handshake outright.
+
+### The user data stream always lists the events it wants
+
+The user data stream dials `/private/ws?listenKey=…&events=…`. The `/ws/<listenKey>` that 0.1.0 dialled no longer
+delivers any event on the testnet. `events` really filters, and event names are not validated: leave one out or
+misspell it and that kind of event silently never arrives, while omitting `events` altogether gave inconsistent
+results when measured. The package therefore always lists four — order and fill updates, account deltas, margin
+calls, and credential expiry — taking the names from the same constants the reader dispatches on rather than
+spelling them a second time.
 
 ### Liveness is a heartbeat, because a quiet market looks exactly like a dead socket
 
@@ -451,13 +468,20 @@ The market data tests are the exception to the credential rule: market streams a
 waits for a one-minute candle to close and asserts on a live connection that `IsClosed` was `false` throughout
 the candle and `true` on its closing push.
 
+Production has exactly one test, marked `[TestCategory("MainnetPublic")]`: with no credential at all it connects
+to production public market data only and must receive at least one BTCUSDT one-minute candle within 60 seconds.
+The testnet still honours the old unprefixed address for market data, so this test is the only evidence that
+the route fix works. It was run once with the address reverted to `/stream` and went red after 60 seconds; it
+turned green only on `/market/stream`.
+
 Unit tests never touch the network, streams included: `Ozakboy.WebSockets` factors connection creation behind
 `IWebSocketConnectionFactory`, and a fake one drives the whole subscription path — register, connect, replay
 the `SUBSCRIBE`, receive, parse, hand to the consumer — offline.
 
 ```
-dotnet test                                    # offline contract tests
-dotnet test --filter "TestCategory=Testnet"    # market data needs no key; trading needs credentials
+dotnet test --filter "TestCategory!=Testnet&TestCategory!=MainnetPublic"   # offline contract tests
+dotnet test --filter "TestCategory=Testnet"                                # market data needs no key; trading needs credentials
+dotnet test --filter "TestCategory=MainnetPublic"                          # production public market data, no credentials used
 ```
 
 ## Security

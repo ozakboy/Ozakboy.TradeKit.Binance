@@ -11,7 +11,7 @@
 
     <PackageProjectUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ozakboy/Ozakboy.TradeKit.Binance</RepositoryUrl>
-    <PackageReleaseNotes>0.1.0 — First published release: trading rules and account queries, never-retried order placement with clientOrderId idempotency, WebSocket klines and mark prices, and the user data stream (orders, fills, account deltas, margin calls, resync signals) with listenKey renewal, heartbeat-based idle detection, and StartAsync so callers can wait for a live connection before acting. Full notes: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/blob/main/CHANGELOG.md</PackageReleaseNotes>
+    <PackageReleaseNotes>0.1.1 — Adapts to Binance's futures WebSocket route split. Market streams now dial /market/stream: the unprefixed /stream, retired on 2026-04-23, connects on production but delivers no data, which is why 0.1.0 received nothing there (it was not a local network problem). The user data stream now dials /private/ws?listenKey=…&amp;events=… with an explicit event list, because the 0.1.0 /ws/&lt;listenKey&gt; no longer delivers events on the testnet. A new production public-market test verifies the fix. Full notes: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/blob/main/CHANGELOG.md</PackageReleaseNotes>
 
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>

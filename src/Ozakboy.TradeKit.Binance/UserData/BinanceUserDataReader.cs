@@ -11,15 +11,16 @@ namespace Ozakboy.TradeKit.Binance.UserData;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>沒有外層包裝。</b> 使用者資料串流走的是單一串流格式 <c>{WebSocketBaseUri}/ws/{listenKey}</c>,
+/// <b>沒有外層包裝。</b> 使用者資料串流走的是單一串流格式
+/// <c>{WebSocketBaseUri}/private/ws?listenKey=…&amp;events=…</c>(<c>…/ws</c> 而不是 <c>…/stream</c>),
 /// 事件物件就是最外層,不像組合串流那樣包在 <c>{"stream":…,"data":…}</c> 裡面。
 /// 照著行情那一側拆外層,會在正常訊息上找不到 <c>stream</c> 欄位而原樣往下走 —— 剛好也能動,
 /// 但那是碰巧,不是設計。
 /// <b>There is no envelope.</b> The user data stream uses the single-stream form
-/// <c>{WebSocketBaseUri}/ws/{listenKey}</c>, so the event object is the outermost one rather than being wrapped
-/// in <c>{"stream":…,"data":…}</c> the way a combined stream is. Copying the market side's unwrapping would find
-/// no <c>stream</c> field and pass the object through unchanged — which happens to work, but by luck rather
-/// than design.
+/// <c>{WebSocketBaseUri}/private/ws?listenKey=…&amp;events=…</c> — <c>…/ws</c> rather than <c>…/stream</c> — so the
+/// event object is the outermost one rather than being wrapped in <c>{"stream":…,"data":…}</c> the way a combined
+/// stream is. Copying the market side's unwrapping would find no <c>stream</c> field and pass the object through
+/// unchanged — which happens to work, but by luck rather than design.
 /// </para>
 /// <para>
 /// <b>訊息原文絕不進任何錯誤。</b> <c>listenKeyExpired</c> 事件本體帶著 listenKey,
@@ -32,16 +33,18 @@ namespace Ozakboy.TradeKit.Binance.UserData;
 /// </para>
 /// <para>
 /// <b>指令回應判為忽略,而且內容一個字都不讀。</b> 這條連線上的心跳是 <c>LIST_SUBSCRIPTIONS</c>,
-/// Testnet 實測它的回應是 <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> —— <b>每一則心跳回應都帶著憑證本身</b>,
-/// 預設設定下每 30 秒一則。判別條件是「有 <c>id</c>、沒有 <c>e</c>」:交易所的事件一律帶 <c>e</c>,
+/// Testnet 實測它的回應在 <c>/private</c> 路由上是 <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c>
+/// (2026-09-12;0.1.0 撥的 <c>/ws/{listenKey}</c> 上則是 <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>)——
+/// <b>每一則心跳回應都帶著憑證本身</b>,預設設定下每 30 秒一則。判別條件是「有 <c>id</c>、沒有 <c>e</c>」:交易所的事件一律帶 <c>e</c>,
 /// 指令回應一律帶 <c>id</c> 而不帶 <c>e</c>。判定之後 <c>result</c> 與 <c>error</c> 都不讀、不轉述;
 /// 被拒的回應(<c>{"error":…,"id":N}</c>)一併忽略,因為心跳被拒的後果只是那一次沒有刷新閒置計時,
 /// 閒置逾時會接手,而轉述它的內容就得先保證那段文字不含任何連線片段,這一點沒有辦法保證。
 /// 沒有 <c>id</c> 也沒有 <c>e</c> 的物件仍判失敗(只說缺少 <c>e</c>):那既不是事件也不是回應,是協定變了。
 /// <b>Command replies are ignored, and not one character of them is read.</b> The heartbeat on this connection
-/// is <c>LIST_SUBSCRIPTIONS</c>, and on the testnet its reply measured as
-/// <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> — <b>every heartbeat reply carries the credential itself</b>, one
-/// every 30 seconds under the defaults. The test is "has <c>id</c>, has no <c>e</c>": exchange events always carry
+/// is <c>LIST_SUBSCRIPTIONS</c>, and on the testnet's <c>/private</c> route its reply measured as
+/// <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c> on 2026-09-12 — on the <c>/ws/{listenKey}</c>
+/// that 0.1.0 dialled it was <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> — so <b>every heartbeat reply carries
+/// the credential itself</b>, one every 30 seconds under the defaults. The test is "has <c>id</c>, has no <c>e</c>": exchange events always carry
 /// <c>e</c>, and command replies always carry <c>id</c> without <c>e</c>. Once so classified, neither
 /// <c>result</c> nor <c>error</c> is read or relayed. A rejection (<c>{"error":…,"id":N}</c>) is ignored as well:
 /// a rejected heartbeat merely fails to refresh the idle clock once, which the idle timeout then handles, whereas

@@ -15,13 +15,16 @@ namespace Ozakboy.TradeKit.Binance.Tests;
 /// <c>dotnet test --filter "TestCategory=Testnet"</c>.
 /// </para>
 /// <para>
-/// 一律連 Testnet(<c>wss://stream.binancefuture.com</c>)。串流路徑與外層包裝的差異都是在這裡實測出來的,
-/// 文件上的 <c>/public/ws/…</c> 在這個環境會「連得上、訂閱受理、一筆資料都沒有」,
-/// 那種失敗從連線狀態完全看不出來,只能靠真的收到資料才算驗過。
-/// The testnet is the only host used. The stream paths and the envelope difference were established here by
-/// measurement, and the documented <c>/public/ws/…</c> form behaves in this environment as "connects,
-/// acknowledges the subscription, delivers nothing" — a failure the connection state says nothing about, which
-/// is why only actually receiving data counts as verification.
+/// 一律連 Testnet(<c>wss://stream.binancefuture.com</c>),走 <c>/market/stream</c>。外層包裝的差異是在這裡實測出來的;
+/// 走錯路由(例如把 K 線訂在 <c>/public</c> 上)的失敗方式是「連得上、訂閱受理、一筆資料都沒有」,
+/// 從連線狀態完全看不出來,只能靠真的收到資料才算驗過。<b>Testnet 對行情仍相容不帶路由的舊位址,
+/// 所以這一組抓不到路由錯誤</b>;那一半由 <see cref="BinanceMarketDataMainnetPublicTests"/> 在主網公開行情上負責。
+/// The testnet is the only host used, on <c>/market/stream</c>. The envelope difference was established here by
+/// measurement. A wrong route — klines subscribed on <c>/public</c>, say — behaves as "connects, acknowledges the
+/// subscription, delivers nothing", a failure the connection state says nothing about, which is why only actually
+/// receiving data counts as verification. <b>The testnet still honours the unprefixed old addresses for market
+/// data, so these tests cannot catch a route mistake</b>; that half belongs to
+/// <see cref="BinanceMarketDataMainnetPublicTests"/> on production public data.
 /// </para>
 /// </remarks>
 [TestClass]

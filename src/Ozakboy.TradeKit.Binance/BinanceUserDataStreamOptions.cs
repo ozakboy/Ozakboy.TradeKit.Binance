@@ -113,21 +113,25 @@ public sealed class BinanceUserDataStreamOptions
     /// </para>
     /// <para>
     /// <b>為什麼現在可以預設開啟。</b> 原本預設關閉,理由是「帳戶正常的沉默」與「死掉的連線」無從分辨。
-    /// 心跳解決了這一點:Testnet 實測,在 <c>/ws/{listenKey}</c> 上送 <c>LIST_SUBSCRIPTIONS</c>,
-    /// 56–111 ms 內就收到回覆,與行情串流的行為相同。所以這裡比照行情串流,心跳 30 秒、閒置逾時 90 秒。
+    /// 心跳解決了這一點:Testnet 實測,在 0.1.0 撥的 <c>/ws/{listenKey}</c> 上送 <c>LIST_SUBSCRIPTIONS</c>,
+    /// 56–111 ms 內就收到回覆;0.1.1 改走 <c>/private/ws?listenKey=…&amp;events=…</c> 之後於 2026-09-12 複測,
+    /// 46–120 ms 內回覆,與行情串流的行為相同。所以這裡比照行情串流,心跳 30 秒、閒置逾時 90 秒。
     /// <b>Why it can now default to on.</b> It used to default to off because an account's normal silence could
     /// not be told apart from a dead connection. The heartbeat settles that: measured on the testnet, a
-    /// <c>LIST_SUBSCRIPTIONS</c> sent on <c>/ws/{listenKey}</c> is answered within 56–111 ms, just as on the market
-    /// stream. The defaults therefore follow the market stream: a 30-second heartbeat and a 90-second idle timeout.
+    /// <c>LIST_SUBSCRIPTIONS</c> sent on the <c>/ws/{listenKey}</c> that 0.1.0 dialled was answered within
+    /// 56–111 ms, and re-measured on 2026-09-12 on the <c>/private/ws?listenKey=…&amp;events=…</c> that 0.1.1 dials,
+    /// within 46–120 ms — just as on the market stream. The defaults therefore follow the market stream: a
+    /// 30-second heartbeat and a 90-second idle timeout.
     /// </para>
     /// <para>
-    /// <b>那則回覆帶著憑證。</b> 實測的回覆是 <c>{"result":["&lt;listenKey&gt;"],"id":N}</c>,也就是每 30 秒
-    /// 一則帶著 listenKey 的訊息。解析器看到「有 <c>id</c>、沒有 <c>e</c>」就直接判為忽略,<c>result</c>
-    /// 不讀也不轉述,見 <c>BinanceUserDataReader</c>。
-    /// <b>That reply carries the credential.</b> The measured reply is
-    /// <c>{"result":["&lt;listenKey&gt;"],"id":N}</c> — a frame holding the listenKey every 30 seconds. The reader
-    /// ignores anything with an <c>id</c> and no <c>e</c> outright, never reading or relaying <c>result</c>; see
-    /// <c>BinanceUserDataReader</c>.
+    /// <b>那則回覆帶著憑證。</b> <c>/private</c> 路由上實測的回覆是
+    /// <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c>,每個元素都帶著 listenKey,每 30 秒一則。
+    /// 解析器看到「有 <c>id</c>、沒有 <c>e</c>」就直接判為忽略,<c>result</c> 不讀也不轉述,
+    /// 見 <c>BinanceUserDataReader</c>。
+    /// <b>That reply carries the credential.</b> The reply measured on the <c>/private</c> route is
+    /// <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c>, every element holding the listenKey, one every
+    /// 30 seconds. The reader ignores anything with an <c>id</c> and no <c>e</c> outright, never reading or relaying
+    /// <c>result</c>; see <c>BinanceUserDataReader</c>.
     /// </para>
     /// </remarks>
     public TimeSpan IdleTimeout { get; set; } = DefaultIdleTimeout;
@@ -264,13 +268,13 @@ public sealed class BinanceUserDataStreamOptions
     /// <remarks>
     /// 應用層 ping 用的是幣安<b>本來就有</b>的控制指令 <c>LIST_SUBSCRIPTIONS</c>,不是自創的訊息。
     /// <c>Ozakboy.WebSockets</c> 警告過:對不認得的對方送未定義的內容,重則被當成協定違規而斷線;
-    /// 這條限制因此不適用 —— <c>/ws/{listenKey}</c> 認得這個指令,Testnet 實測每一次都有回覆,
+    /// 這條限制因此不適用 —— <c>/private/ws</c> 認得這個指令,Testnet 實測每一次都有回覆,
     /// 也沒有因此斷線。心跳間隔為零時不設定 ping,連產生器都不交出去。
     /// The application-level ping is <c>LIST_SUBSCRIPTIONS</c>, a control command Binance <b>already defines</b>,
     /// not an invented payload. <c>Ozakboy.WebSockets</c> warns that sending undefined content to a peer that does
     /// not recognise it can be treated as a protocol violation; that caveat does not apply here, because
-    /// <c>/ws/{listenKey}</c> recognises the command — measured on the testnet, every one was answered and none
-    /// caused a disconnect. With a zero interval no ping is configured and the factory is not handed over at all.
+    /// <c>/private/ws</c> recognises the command — measured on the testnet, every one was answered and none caused a
+    /// disconnect. With a zero interval no ping is configured and the factory is not handed over at all.
     /// </remarks>
     internal WebSocketClientOptions CreateWebSocketOptions(Uri uri, Func<string> keepAlivePayloadFactory)
     {

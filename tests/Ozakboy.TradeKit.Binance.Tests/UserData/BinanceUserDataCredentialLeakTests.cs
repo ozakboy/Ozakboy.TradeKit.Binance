@@ -154,6 +154,17 @@ public sealed class BinanceUserDataCredentialLeakTests
             }
         }
 
+        // 0.1.1 起憑證放在撥號位址的 listenKey= 查詢參數裡 —— 撥號位址是它<b>唯一</b>該出現的地方,
+        // 所以這裡刻意不收集它。先確認 canary 真的就是撥號用的那把憑證,否則「沒出現」什麼也證明不了。
+        // Since 0.1.1 the credential sits in the listenKey= query of the dialled address, the one place it
+        // belongs, so that address is deliberately not collected. First confirm the canary really is the
+        // credential being dialled with; otherwise "it never appeared" proves nothing.
+        Assert.Contains(
+            Canary,
+            factory.Created[0].ConnectedUri?.OriginalString ?? string.Empty,
+            StringComparison.Ordinal,
+            "canary 不是撥號時用的憑證,這條測試驗不到任何東西。");
+
         var combined = string.Join('\n', texts);
 
         Assert.DoesNotContain(

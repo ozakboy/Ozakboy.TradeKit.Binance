@@ -140,6 +140,10 @@ await foreach (var item in feed.SubscribeKlinesAsync(["BTCUSDT", "ETHUSDT"], Kli
 有界佇列背壓 —— 全部由 [`Ozakboy.WebSockets`](https://github.com/ozakboy/Ozakboy.WebSockets) 負責,
 本套件不重做;本套件負責的是幣安的協定細節:串流名稱、路徑走哪一條、外層包裝怎麼拆、欄位縮寫怎麼對映。
 
+幣安把合約 WebSocket 依資料類別拆成三條路由:行情(K 線、標記價)走 `/market`、使用者資料走 `/private`、
+盤口(bookTicker、depth)走 `/public`。本套件自己接上路由,用端點覆寫(`BinanceEndpoints.CreateOverride`)
+指向代理或重播伺服器時,請給**主機根位址**(或代理前綴),不要把 `/market` 之類的路由寫進去。
+
 可調的參數在 `BinanceMarketStreamOptions`:心跳間隔、閒置逾時、重連次數上限、佇列容量與背壓策略,
 以及標記價要不要用每秒更新的串流。
 
@@ -366,16 +370,26 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 這裡的 `IsClosed` 是用收盤時間與注入的時間來源比對出來的。把整串都當成已收盤,
 等於把「查詢當下的最新價」寫成收盤價;存進歷史之後,之後的回測會用一根從未存在的 K 線。
 
-### 串流路徑是實測出來的,不是照文件抄的
+### 路由照官方公告走,而且在主網上實際驗過
 
-連 `wss://stream.binancefuture.com/stream` 並以 `SUBSCRIBE` 控制訊息訂閱,於 2026-09-11 實際收到資料驗證。
-文件目前刊載的 `/public/ws/…` 與 `/public/stream…` 在這個環境下的失敗方式最壞:
-握手成功、`SUBSCRIBE` 還回了 `{"result":null,"id":1}` 表示受理,然後一筆行情都不送。
-沒有錯誤、沒有斷線,只有永遠不動的價格。因此已驗證的路徑寫死在程式碼裡,不由設定拼裝。
+幣安把合約 WebSocket 拆成 `/public`、`/market`、`/private` 三條路由
+([官方公告](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Important-WebSocket-Change-Notice)),
+沒帶路由前綴的舊位址 2026-04-23 起停用,只收得到 public 類資料。它的失敗方式最壞:2026-09-12 在主網實測,
+不帶路由的 `/stream` 與 `/ws/…` 訂 K 線與標記價,握手成功之後一個 frame 都沒有。沒有錯誤、沒有斷線,
+只有永遠不動的價格。0.1.0 在主網上零資料就是這個原因,當時卻被誤判成本機網路問題。
+Testnet 對行情仍相容舊位址,只在 Testnet 上驗證抓不到這件事,所以另有一條只連主網公開行情的測試。
+路由與路徑都寫死在程式碼裡,不由設定拼裝。
 
-另外兩個實測到的細節。外層包裝由**路徑**決定,與訂閱幾檔無關:走 `/stream` 就算只訂一檔,
-每則訊息仍包在 `{"stream":…,"data":…}` 裡;走 `/ws` 就算訂十檔也沒有包裝。
+另外兩個實測到的細節。外層包裝由**路徑**決定,與訂閱幾檔無關:走 `…/stream` 就算只訂一檔,
+每則訊息仍包在 `{"stream":…,"data":…}` 裡;走 `…/ws` 就算訂十檔也沒有包裝。
 而 `streams=` 裡的分隔符號必須是斜線,換成逗號連握手都不會成功。
+
+### 使用者資料串流一律明列要收的事件
+
+使用者資料串流撥的是 `/private/ws?listenKey=…&events=…`。0.1.0 撥的 `/ws/<listenKey>` 在 Testnet 上
+已經收不到任何事件。`events` 是真的過濾器,而且事件名稱不會被驗證:少列或拼錯一個,那一類事件就安靜地永遠不來;
+省略 `events` 的連線實測時好時壞,不能依賴。所以本套件一律明列委託與成交、帳戶增量、保證金追繳、憑證失效四種,
+名稱直接取自解析器分派事件時用的同一組常數,不另寫一份字串。
 
 ### 存活偵測靠心跳,因為冷清的市場和死掉的連線長得一模一樣
 
@@ -412,13 +426,18 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 `[TestCategory("Testnet")]` 測試完全不需要金鑰。其中一條會等一根 1m K 線收盤,
 在真實連線上斷言 `IsClosed` 在整根 K 線期間為 `false`、收盤那一筆為 `true`。
 
+主網只有一條測試,標記 `[TestCategory("MainnetPublic")]`:不設任何憑證,只連主網的公開行情,
+在 60 秒內收到至少一根 BTCUSDT 1m K 線。Testnet 對行情仍相容不帶路由的舊位址,所以這條是路由修正有效的
+唯一證據。把位址暫時改回 `/stream` 跑過一次,它確實在 60 秒後紅燈;改回 `/market/stream` 才綠。
+
 單元測試全程不連網,串流也不例外:`Ozakboy.WebSockets` 把建立連線抽成
 `IWebSocketConnectionFactory`,用假工廠就能離線走完整條訂閱路徑
 (登記訂閱 → 連線 → 重放 `SUBSCRIBE` → 收訊息 → 解析 → 交給消費端)。
 
 ```
-dotnet test                                    # 離線合約測試
-dotnet test --filter "TestCategory=Testnet"    # 行情不需金鑰,交易需要憑證
+dotnet test --filter "TestCategory!=Testnet&TestCategory!=MainnetPublic"   # 離線合約測試
+dotnet test --filter "TestCategory=Testnet"                                # 行情不需金鑰,交易需要憑證
+dotnet test --filter "TestCategory=MainnetPublic"                          # 主網公開行情,不使用任何憑證
 ```
 
 ## 安全

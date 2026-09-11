@@ -16,15 +16,15 @@ namespace Ozakboy.TradeKit.Binance.UserData;
 /// </para>
 /// <para>
 /// <b><see cref="StreamIdentifier"/> 是一個固定字面值,不是連線位址。</b> 使用者資料串流的位址是
-/// <c>{WebSocketBaseUri}/ws/{listenKey}</c>,而 listenKey 是能連上該帳戶私有資料的憑證 ——
+/// <c>{WebSocketBaseUri}/private/ws?listenKey={listenKey}&amp;events=…</c>,而 listenKey 是能連上該帳戶私有資料的憑證 ——
 /// 它絕對不可以出現在任何錯誤訊息、診斷資料或日誌裡。行情那一側把串流名稱放進
 /// <c>BinanceStreamErrorDataKeys.StreamNames</c>,這一側改放這個固定字串,診斷時仍分得出是哪一條串流,
 /// 又不會把憑證一起帶出去。
 /// <b><see cref="StreamIdentifier"/> is a fixed literal, not an address.</b> The user data stream dials
-/// <c>{WebSocketBaseUri}/ws/{listenKey}</c>, and the listenKey is a credential that reaches the account's private
-/// data: it must never appear in an error message, in diagnostic data, or in a log. Where the market side puts
-/// real stream names into <c>BinanceStreamErrorDataKeys.StreamNames</c>, this side puts this constant instead —
-/// still enough to say which stream failed, without carrying the credential out with it.
+/// <c>{WebSocketBaseUri}/private/ws?listenKey={listenKey}&amp;events=…</c>, and the listenKey is a credential that
+/// reaches the account's private data: it must never appear in an error message, in diagnostic data, or in a log.
+/// Where the market side puts real stream names into <c>BinanceStreamErrorDataKeys.StreamNames</c>, this side puts
+/// this constant instead — still enough to say which stream failed, without carrying the credential out with it.
 /// </para>
 /// </remarks>
 internal static class BinanceUserDataPaths
@@ -77,6 +77,40 @@ internal static class BinanceUserDataPaths
     /// swallows a protocol change in the event name rather than surfacing it.
     /// </remarks>
     public const string ListenKeyExpiredEvent = "listenKeyExpired";
+
+    /// <summary>
+    /// 撥號時放進 <c>events=</c> 查詢參數的事件清單:委託與成交、帳戶增量、保證金追繳、憑證失效。
+    /// The event list placed in the <c>events=</c> query when dialling: order and fill updates, account deltas,
+    /// margin calls, and credential expiry.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>漏列等於永遠收不到那一類事件,而且名稱不會被驗證。</b> <c>events</c> 是真的過濾器(只帶
+    /// <c>ACCOUNT_UPDATE</c> 的連線收不到 <c>ORDER_TRADE_UPDATE</c>);夾一個不存在的名稱照樣連得上、
+    /// 照樣收到其他事件。拼錯或漏列都不會有任何錯誤,只會讓某一條訂閱安靜地永遠沒有資料 ——
+    /// 漏了 <c>listenKeyExpired</c>,憑證過期後串流就不會自己重建;漏了 <c>MARGIN_CALL</c>,追繳警告就不會出現。
+    /// <b>Leaving a name out means never receiving that kind of event, and the names are not validated.</b>
+    /// <c>events</c> really filters — a connection with only <c>ACCOUNT_UPDATE</c> never receives
+    /// <c>ORDER_TRADE_UPDATE</c> — while a made-up name still connects and still receives the rest. Neither a
+    /// misspelling nor an omission raises anything; one subscription just stays silent for ever. Without
+    /// <c>listenKeyExpired</c> the stream never rebuilds itself after the credential lapses; without
+    /// <c>MARGIN_CALL</c> no margin warning ever appears.
+    /// </para>
+    /// <para>
+    /// 所以這份清單<b>直接引用解析器分派用的同一組常數</b>,不另寫字串。兩份字串就是兩個會拼錯的地方,
+    /// 而引用同一個常數,解析器認得的名稱與訂閱出去的名稱就不可能不一致。
+    /// The list therefore <b>references the very constants the reader dispatches on</b> rather than spelling the
+    /// names again. Two copies of a string are two places to misspell it; sharing the constant makes it impossible
+    /// for the names subscribed to and the names recognised to drift apart.
+    /// </para>
+    /// </remarks>
+    public static readonly IReadOnlyList<string> StreamEvents =
+    [
+        OrderTradeUpdateEvent,
+        AccountUpdateEvent,
+        MarginCallEvent,
+        ListenKeyExpiredEvent,
+    ];
 
     /// <summary>建立憑證的操作名稱,用於憑證缺漏時的錯誤訊息。The create operation name, used when credentials are missing.</summary>
     public const string CreateOperation = "建立使用者資料串流 / start user data stream";

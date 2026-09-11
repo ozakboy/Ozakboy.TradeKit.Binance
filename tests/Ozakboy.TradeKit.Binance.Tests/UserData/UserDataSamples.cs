@@ -113,16 +113,24 @@ internal static class UserDataSamples
         """{"e":"MARGIN_CALL","E":1789117383500,"p":[{"s":"ETHUSDT","ps":"SHORT","pa":"-2.000","mt":"ISOLATED","iw":"12.50","mp":"2600.00","up":"-80.00"}]}""";
 
     /// <summary>
-    /// 心跳 <c>LIST_SUBSCRIPTIONS</c> 的回覆。<b>形狀取自 Testnet 實測:<c>result</c> 裡就是憑證本身。</b>
-    /// The reply to the <c>LIST_SUBSCRIPTIONS</c> heartbeat. <b>The shape is as measured on the testnet: the
-    /// <c>result</c> array holds the credential itself.</b>
+    /// 心跳 <c>LIST_SUBSCRIPTIONS</c> 的回覆。<b>形狀取自 Testnet 實測:<c>result</c> 的每一個元素都帶著憑證。</b>
+    /// The reply to the <c>LIST_SUBSCRIPTIONS</c> heartbeat. <b>The shape is as measured on the testnet: every
+    /// element of the <c>result</c> array carries the credential.</b>
     /// </summary>
     /// <param name="listenKey">要放進回覆裡的憑證。The credential to embed.</param>
     /// <param name="id">請求編號。The request id.</param>
     /// <returns>回覆訊息。The reply frame.</returns>
+    /// <remarks>
+    /// 2026-09-12 在 <c>/private/ws?listenKey=…&amp;events=…</c> 上實測,回覆是「憑證@事件名」的清單,
+    /// 事件依字母排序;0.1.0 撥的 <c>/ws/{listenKey}</c> 上則只有 <c>["&lt;listenKey&gt;"]</c>。
+    /// 兩種形狀都帶著憑證,解析器一律不讀內容。
+    /// Measured on <c>/private/ws?listenKey=…&amp;events=…</c> on 2026-09-12, the reply lists "credential@event"
+    /// entries in alphabetical order; on the <c>/ws/{listenKey}</c> that 0.1.0 dialled it was only
+    /// <c>["&lt;listenKey&gt;"]</c>. Both shapes carry the credential, and the reader never reads either.
+    /// </remarks>
     public static string HeartbeatReply(string listenKey, long id) => string.Create(
         CultureInfo.InvariantCulture,
-        $$"""{"result":["{{listenKey}}"],"id":{{id}}}""");
+        $$"""{"result":["{{listenKey}}@ACCOUNT_UPDATE","{{listenKey}}@MARGIN_CALL","{{listenKey}}@ORDER_TRADE_UPDATE","{{listenKey}}@listenKeyExpired"],"id":{{id}}}""");
 
     /// <summary>
     /// 被拒的指令回覆,訊息裡刻意夾帶憑證 —— 用來驗證「被拒的回覆同樣不轉述」。

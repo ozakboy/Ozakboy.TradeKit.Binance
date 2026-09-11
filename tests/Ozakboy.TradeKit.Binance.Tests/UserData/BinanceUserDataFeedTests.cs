@@ -1,5 +1,6 @@
 using Ozakboy.TradeKit.Binance.MarketData;
 using Ozakboy.TradeKit.Binance.Tests.TestSupport;
+using Ozakboy.TradeKit.Binance.UserData;
 
 namespace Ozakboy.TradeKit.Binance.Tests.UserData;
 
@@ -11,6 +12,12 @@ namespace Ozakboy.TradeKit.Binance.Tests.UserData;
 [TestClass]
 public sealed class BinanceUserDataFeedTests
 {
+    /// <summary>
+    /// 使用者資料撥號位址應該恰好帶的查詢參數。
+    /// The query parameters the user data address should carry, and no others.
+    /// </summary>
+    private static readonly string[] ExpectedUserDataQueryNames = ["listenKey", "events"];
+
     // ── 分流 / Fan-out ────────────────────────────────────────────────
 
     [TestMethod]
@@ -551,6 +558,58 @@ public sealed class BinanceUserDataFeedTests
     }
 
     [TestMethod]
+    public async Task TheStreamDialsThePrivateRouteWithTheCredentialOnlyInTheQuery()
+    {
+        // 路由錯了不會有任何錯誤,只會握手成功、零事件 —— 0.1.0 撥的 /ws/{listenKey} 在 Testnet 上就是這樣。
+        // events 又是真的過濾器、名稱不被驗證,少列或拼錯一個,那一類事件就安靜地永遠不來。
+        // A wrong route raises no error, only a handshake followed by silence — which is what the 0.1.0
+        // /ws/{listenKey} now does on the testnet. And events really filters without validating names, so one
+        // omission or misspelling makes that kind of event silently never arrive.
+        var connection = new FakeWebSocketConnection([UserDataSamples.OrderNew]);
+        var (feed, _, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
+
+        using (http)
+        {
+            await using (feed)
+            {
+                _ = await UserDataFixture.TakeAsync(feed.SubscribeOrderUpdatesAsync(), 1);
+
+                var uri = connection.ConnectedUri;
+
+                Assert.IsNotNull(uri, "串流沒有撥號。");
+                Assert.AreEqual("wss", uri.Scheme);
+                Assert.AreEqual("stream.binancefuture.com", uri.Host);
+                Assert.AreEqual("/private/ws", uri.AbsolutePath);
+
+                var query = ParseQuery(uri);
+
+                CollectionAssert.AreEquivalent(ExpectedUserDataQueryNames, query.Keys.ToArray());
+                Assert.AreEqual(UserDataSamples.ListenKey, query["listenKey"]);
+
+                // 憑證在整個位址裡只能出現這一次:不在路徑、不在事件清單。
+                // The credential may appear exactly once in the whole address: not in the path, not among the events.
+                Assert.AreEqual(
+                    1,
+                    uri.OriginalString.Split(UserDataSamples.ListenKey).Length - 1,
+                    "憑證出現在查詢參數 listenKey= 以外的地方。");
+
+                var events = query["events"].Split('/');
+
+                Assert.HasCount(4, events);
+                CollectionAssert.AreEquivalent(
+                    new[]
+                    {
+                        BinanceUserDataPaths.OrderTradeUpdateEvent,
+                        BinanceUserDataPaths.AccountUpdateEvent,
+                        BinanceUserDataPaths.MarginCallEvent,
+                        BinanceUserDataPaths.ListenKeyExpiredEvent,
+                    },
+                    events);
+            }
+        }
+    }
+
+    [TestMethod]
     public async Task TheStreamIdentifierInDiagnosticsIsAFixedLiteralRatherThanTheCredential()
     {
         var connection = new FakeWebSocketConnection(["}{ not json"]);
@@ -569,6 +628,22 @@ public sealed class BinanceUserDataFeedTests
             }
         }
     }
+
+    /// <summary>
+    /// 把查詢字串拆成已解碼的名稱與值。
+    /// Splits a query string into decoded names and values.
+    /// </summary>
+    /// <param name="uri">要拆的位址。The address to split.</param>
+    /// <returns>名稱對應值。Names mapped to values.</returns>
+    private static Dictionary<string, string> ParseQuery(Uri uri) =>
+        uri.Query
+            .TrimStart('?')
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(static pair => pair.Split('=', 2))
+            .ToDictionary(
+                static pair => Uri.UnescapeDataString(pair[0]),
+                static pair => pair.Length > 1 ? Uri.UnescapeDataString(pair[1]) : string.Empty,
+                StringComparer.Ordinal);
 
     // ── 憑證生命週期 / Credential lifecycle ────────────────────────────
 

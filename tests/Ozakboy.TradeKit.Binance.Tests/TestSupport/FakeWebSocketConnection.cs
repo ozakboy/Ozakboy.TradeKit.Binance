@@ -62,12 +62,24 @@ internal sealed class FakeWebSocketConnection : IWebSocketConnection
     /// </summary>
     public bool Connected { get; private set; }
 
+    /// <summary>
+    /// 握手時撥的是哪個位址;還沒撥過時為 <see langword="null"/>。
+    /// The address the handshake dialled, or <see langword="null"/> before any attempt.
+    /// </summary>
+    /// <remarks>
+    /// 路由錯了不會有任何錯誤,只會握手成功、零資料 —— 所以撥號位址本身就是要斷言的東西。
+    /// A wrong route raises no error, only a successful handshake followed by silence, so the dialled address is
+    /// itself something to assert on.
+    /// </remarks>
+    public Uri? ConnectedUri { get; private set; }
+
     /// <inheritdoc />
     public WebSocketState State { get; private set; } = WebSocketState.None;
 
     /// <inheritdoc />
     public Task ConnectAsync(Uri uri, CancellationToken cancellationToken)
     {
+        ConnectedUri = uri;
         Connected = true;
         State = WebSocketState.Open;
         return Task.CompletedTask;
