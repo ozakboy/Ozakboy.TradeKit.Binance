@@ -50,16 +50,16 @@
   -->
   <ItemGroup>
     <PackageReference Include="Ozakboy.TradeKit.Abstractions" Version="0.3.0" />
-    <PackageReference Include="Ozakboy.Http" Version="0.3.0" />
+    <PackageReference Include="Ozakboy.Http" Version="0.3.2" />
     <PackageReference Include="Ozakboy.Core.Abstractions" Version="0.3.0" />
     <!--
       0.1.3 起 SecretMasker 進了公開 API(BinanceUserDataFeed 接受遮罩器的那個建構式多載),
       所以明寫這一行,不靠 Ozakboy.Http 遞移帶進來:公開契約上的型別來自遞移相依,
-      上游哪天不再帶它,斷的是本套件的編譯而不是上游的。版號與 Ozakboy.Http 0.3.0 帶的那一份相同。
+      上游哪天不再帶它,斷的是本套件的編譯而不是上游的。版號與 Ozakboy.Http 0.3.2 帶的那一份相同。
       Since 0.1.3 SecretMasker is part of the public API — the BinanceUserDataFeed overload that takes a masker —
       so it is referenced directly instead of arriving transitively through Ozakboy.Http: a type on the public
       contract that comes from a transitive dependency breaks this package's build, not upstream's, the day
-      upstream stops carrying it. The version matches the one Ozakboy.Http 0.3.0 brings.
+      upstream stops carrying it. The version matches the one Ozakboy.Http 0.3.2 brings.
     -->
     <PackageReference Include="Ozakboy.Security" Version="0.1.1" />
     <!--
