@@ -177,6 +177,63 @@ public sealed class BinanceUserDataStreamOptionsTests
     }
 
     [TestMethod]
+    public void TheDefaultRenewalRetryBackoffsAllFitInsideOneRenewalPeriod()
+    {
+        // 退避長過續期週期就永遠用不到:每一次都會跨過下一個排程時刻而被跳過,
+        // 「有重試」就成了一句設定上寫著、實際上從來沒發生過的話。
+        // A backoff longer than the renewal period can never be taken: every one would cross the next scheduled
+        // instant and be skipped, leaving "it retries" true only in the settings.
+        var options = new BinanceUserDataStreamOptions();
+
+        Assert.IsTrue(options.Validate().IsSuccess);
+
+        foreach (var backoff in options.ListenKeyRenewalRetryBackoffs)
+        {
+            Assert.IsLessThan(
+                options.ListenKeyKeepAliveInterval,
+                backoff,
+                $"退避 {backoff} 長過續期週期,永遠用不到。");
+        }
+
+        Assert.AreEqual(
+            TimeSpan.FromMinutes(1),
+            options.ListenKeyRenewalRetryBackoffs[0],
+            "第一次重試應該一分鐘後就發動,而不是等下一個三十分鐘。");
+    }
+
+    [TestMethod]
+    public void ANonPositiveRenewalRetryBackoffIsRejected()
+    {
+        // 零或負值等於不等待就重打,一次網路中斷會變成一串連發的請求,而限流正是續期失敗的原因之一。
+        // A zero or negative backoff retries immediately, turning one outage into a burst — and the rate limiter
+        // is among the reasons a renewal fails at all.
+        Assert.IsTrue(
+            new BinanceUserDataStreamOptions { ListenKeyRenewalRetryBackoffs = [TimeSpan.Zero] }
+                .Validate()
+                .IsFailure);
+
+        Assert.IsTrue(
+            new BinanceUserDataStreamOptions
+            {
+                ListenKeyRenewalRetryBackoffs = [TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(-1)],
+            }
+                .Validate()
+                .IsFailure);
+    }
+
+    [TestMethod]
+    public void AnEmptyRenewalRetryBackoffListIsAcceptedAndMeansNoRetry()
+    {
+        // 明確表示「不要重試」要有辦法說得出來,而且它與「漏設定成 null」必須分得開。
+        // There has to be a way to say "do not retry", and it must be distinguishable from having left it null.
+        Assert.IsTrue(
+            new BinanceUserDataStreamOptions { ListenKeyRenewalRetryBackoffs = [] }.Validate().IsSuccess);
+
+        Assert.IsTrue(
+            new BinanceUserDataStreamOptions { ListenKeyRenewalRetryBackoffs = null! }.Validate().IsFailure);
+    }
+
+    [TestMethod]
     public void AnUndefinedBackpressureStrategyIsRejected()
     {
         Assert.IsTrue(

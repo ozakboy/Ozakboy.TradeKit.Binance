@@ -107,11 +107,24 @@ namespace Ozakboy.TradeKit.Binance;
 /// </remarks>
 public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
 {
+    /// <summary>
+    /// 日誌裡代表「這件事還沒發生過」的字樣,例如憑證還沒有成功續期過。
+    /// What a log line says for something that has not happened yet, such as a credential never renewed.
+    /// </summary>
+    /// <remarks>
+    /// 寫成這個字樣而不是留空或填 <c>0001-01-01</c>:空白讀起來像日誌自己壞了,
+    /// 而一個看起來像真日期的預設值會被當成真的發生過。
+    /// Spelled out rather than left blank or filled with <c>0001-01-01</c>: a blank reads as a broken log line,
+    /// and a default that looks like a real date gets taken for something that really happened.
+    /// </remarks>
+    private const string NeverHappened = "(尚未發生 / never)";
+
     private readonly BinanceApiClient _api;
     private readonly BinanceEndpoints _endpoints;
     private readonly BinanceListenKeyClient _listenKeys;
     private readonly BinanceUserDataStreamOptions _streamOptions;
     private readonly ILoggerFactory? _loggerFactory;
+    private readonly ILogger? _logger;
     private readonly TimeProvider _timeProvider;
     private readonly IWebSocketConnectionFactory? _connectionFactory;
 
@@ -119,6 +132,21 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     private readonly Lock _subscriberGate = new();
     private readonly List<IUserDataSubscriber> _subscribers = [];
     private readonly CancellationTokenSource _lifetime = new();
+
+    /// <summary>
+    /// 守住憑證生命週期的那幾個計數與時刻。
+    /// Guards the credential lifecycle's counts and instants.
+    /// </summary>
+    /// <remarks>
+    /// 它們由三個不同的執行緒改:續期計時器、讀取迴圈(收到 <c>listenKeyExpired</c> 時)、啟動路徑。
+    /// 逐欄位用 <see cref="Interlocked"/> 也能做到不撕裂,但讀快照時就會拿到「次數已經加了、時刻還沒更新」
+    /// 這種半套的狀態 —— 而這份快照的用途正是把幾個欄位<b>放在一起</b>看。
+    /// Three threads touch them: the renewal timer, the read loop when a <c>listenKeyExpired</c> arrives, and the
+    /// start-up path. Per-field <see cref="Interlocked"/> would keep each one intact and still let a snapshot
+    /// catch a count already incremented next to an instant not yet updated — and reading these fields
+    /// <b>together</b> is the whole point of the snapshot.
+    /// </remarks>
+    private readonly Lock _statusGate = new();
 
     private WebSocketClient? _session;
     private Task? _pump;
@@ -128,6 +156,12 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     private int _disposed;
     private Error? _stopReason;
     private long _requestId;
+
+    private DateTimeOffset? _credentialCreatedAt;
+    private DateTimeOffset? _lastRenewedAt;
+    private int _renewalCount;
+    private int _consecutiveRenewalFailures;
+    private int _rebuildCount;
 
     /// <summary>
     /// 建立使用者資料來源。
@@ -247,6 +281,13 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
         _endpoints = _api.Endpoints;
         _listenKeys = new BinanceListenKeyClient(_api, masker);
         _loggerFactory = loggerFactory;
+
+        // 憑證生命週期的日誌走這一個記錄器;連線層那一份仍由工廠自己建立,兩者的類別名稱因此分得開。
+        // 沒有工廠就是沒有日誌 —— 這一層不自備輸出端,宿主沒接日誌時不該憑空多出一個。
+        // The credential lifecycle logs through this logger while the connection layer still builds its own from
+        // the factory, which keeps the two category names apart. No factory means no logging: this layer brings
+        // no sink of its own and must not conjure one for a host that wired none up.
+        _logger = loggerFactory?.CreateLogger<BinanceUserDataFeed>();
         _timeProvider = timeProvider ?? TimeProvider.System;
         _connectionFactory = connectionFactory;
     }
@@ -294,6 +335,45 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     /// The settings in force.
     /// </summary>
     public BinanceUserDataStreamOptions StreamOptions => _streamOptions;
+
+    /// <summary>
+    /// 串流憑證生命週期的當下快照:何時建立、何時續期、成功與失敗各幾次。
+    /// A snapshot of the stream credential's lifecycle as it stands: when it was created, when it was last
+    /// renewed, and how many renewals and rebuilds have happened.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>這是刻意只加在具體型別上的。</b> <see cref="IUserDataFeed"/> 是跨交易所的契約,而 listenKey 是幣安
+    /// 這一家的機制,別家的串流憑證未必有續期這回事;把它推上介面等於要求每一家都長出一個它沒有的概念。
+    /// 宿主要呈現健康度時,對這個具體型別取用即可 —— <c>AddBinanceUserData</c> 同時以具體型別與介面登記同一個單例。
+    /// <b>This deliberately sits on the concrete type alone.</b> <see cref="IUserDataFeed"/> is a cross-exchange
+    /// contract while the listenKey is Binance's own mechanism, and another exchange's stream credential may have
+    /// no renewal at all; putting this on the interface would demand that every implementation grow a concept it
+    /// does not have. A host rendering health reads it from the concrete type, which
+    /// <c>AddBinanceUserData</c> registers as the same singleton behind both the type and the interface.
+    /// </para>
+    /// <para>
+    /// 每次讀都是一份不會再變的複本,在鎖內取出,所以幾個欄位彼此一致 ——
+    /// 不會出現「次數已經加了、時刻還沒跟上」那種湊不起來的組合。
+    /// Every read produces a copy that never changes afterwards, taken under the lock so the members agree with
+    /// one another: a count already incremented beside an instant that has not caught up cannot be observed.
+    /// </para>
+    /// </remarks>
+    public BinanceListenKeyStatus ListenKeyStatus
+    {
+        get
+        {
+            lock (_statusGate)
+            {
+                return new BinanceListenKeyStatus(
+                    _credentialCreatedAt,
+                    _lastRenewedAt,
+                    _renewalCount,
+                    _consecutiveRenewalFailures,
+                    _rebuildCount);
+            }
+        }
+    }
 
     /// <inheritdoc />
     public IAsyncEnumerable<Result<Order>> SubscribeOrderUpdatesAsync(
@@ -559,6 +639,13 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
 
         _credentialCreated = true;
 
+        // 新的一把憑證,生命週期從這一刻重新算起。續期的時刻與連續失敗次數都屬於<b>某一把</b>憑證,
+        // 留著上一把的讀數會讓「這把憑證撐了多久」變成一個湊出來的數字。
+        // A new credential restarts the lifecycle here. The renewal instant and the consecutive failure count
+        // belong to <b>one</b> credential, and carrying the previous key's readings over would make "how long did
+        // this credential last" a number nobody can trust.
+        RecordCredentialCreated();
+
         // 走 /private 路由,憑證放在 listenKey= 查詢參數,並明列要收的事件。0.1.0 撥的 /ws/{listenKey}
         // 在 Testnet 上已經收不到任何事件;events 省略時是否收得到實測不一致,所以一律明列。
         // 位址含憑證,所以這個 Uri 本身也是祕密。Ozakboy.WebSockets 0.2.1 只把 authority 寫進日誌
@@ -683,6 +770,8 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
                     Stop(rebuilt.Error!);
                     break;
                 }
+
+                RecordRebuild();
 
                 Volatile.Write(ref _session, next);
             }
@@ -827,6 +916,16 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
                 return false;
 
             case BinanceUserDataEventKind.ListenKeyExpired:
+                // 憑證的完整履歷寫在這裡,而且是在重建把它洗掉<b>之前</b>。這一行是「30 分鐘續期一次,
+                // 憑證為什麼撐不到 60 分鐘」唯一答得出來的地方:最後一次成功續期才過幾分鐘、連續失敗是 0,
+                // 那就是憑證本身有壽命上限;連續失敗不是 0,就是那幾次 PUT 沒送成功。兩者在串流上長得一模一樣。
+                // The credential's whole history is written here, <b>before</b> the rebuild overwrites it. This is
+                // the only place that can answer why a credential renewed every 30 minutes still lapsed before 60:
+                // a renewal minutes ago with no consecutive failures means the credential has a ceiling of its
+                // own, while a non-zero failure count means those PUTs did not get through. On the stream itself
+                // the two are indistinguishable.
+                LogCredentialExpired();
+
                 // UntrustedSince 用事件時間而不是「現在」:憑證是在那一刻失效的,而這則訊號可能晚幾毫秒
                 // 才送出去。兩個時刻在型別上是分開的欄位,正是因為它們不同。
                 // UntrustedSince takes the event time rather than "now": the credential lapsed at that moment
@@ -845,28 +944,102 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 依排程續期憑證,失敗時以短退避重試。
+    /// Renews the credential on a schedule, retrying a failure after a short backoff.
+    /// </summary>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>續期迴圈的工作。The renewal loop's task.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>排程時刻在等待之前就固定下來,重試絕不推遲它。</b> 每一輪開始前先算好下一個排程續期的時刻,
+    /// 重試只在那之前進行;否則「續期愈失敗、下一次排程愈晚」——
+    /// 而愈失敗正是愈該早一點再試的時候,方向剛好相反。
+    /// <b>The scheduled instant is fixed before the wait and no retry pushes it back.</b> The next scheduled
+    /// renewal is computed at the top of each round and retries happen only before it; otherwise the more
+    /// renewals failed the later the next one would run, which is the opposite of what a run of failures calls
+    /// for.
+    /// </para>
+    /// <para>
+    /// <b>沒有重試的話,60 分鐘的有效期只剩一次機會。</b> 30 分鐘一次的續期失敗之後若什麼都不做,
+    /// 這把憑證就只剩下一次排程的機會;那一次再失敗,憑證過期、串流斷掉,缺口期間的委託與成交不補送。
+    /// <b>Without retries a 60-minute credential gets one more chance.</b> Doing nothing after a failed
+    /// 30-minute renewal leaves exactly one scheduled attempt; if that fails too the credential lapses, the
+    /// stream drops, and nothing from the gap is replayed.
+    /// </para>
+    /// </remarks>
     private async Task KeepAliveAsync(CancellationToken cancellationToken)
     {
+        var interval = _streamOptions.ListenKeyKeepAliveInterval;
+        var backoffs = _streamOptions.ListenKeyRenewalRetryBackoffs;
+        var due = _timeProvider.GetUtcNow() + interval;
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await Task
-                    .Delay(_streamOptions.ListenKeyKeepAliveInterval, _timeProvider, cancellationToken)
-                    .ConfigureAwait(false);
+                var nextDue = due + interval;
 
-                var kept = await _listenKeys.KeepAliveAsync(cancellationToken).ConfigureAwait(false);
+                await DelayUntilAsync(due, cancellationToken).ConfigureAwait(false);
 
-                if (kept.IsFailure)
+                for (var attempt = 0; !cancellationToken.IsCancellationRequested; attempt++)
                 {
-                    // 續期失敗不會立刻讓串流停掉 —— 憑證還有效期可以撐,而下一次續期多半會成功。
+                    var startedAt = _timeProvider.GetTimestamp();
+                    var kept = await _listenKeys.KeepAliveAsync(cancellationToken).ConfigureAwait(false);
+                    var elapsed = (long)_timeProvider.GetElapsedTime(startedAt).TotalMilliseconds;
+
+                    if (kept.IsSuccess)
+                    {
+                        var (renewals, minutesSince) = RecordRenewalSucceeded();
+
+                        BinanceUserDataLog.RenewalSucceeded(_logger, renewals, elapsed, minutesSince);
+
+                        break;
+                    }
+
+                    var failures = RecordRenewalFailed();
+
+                    // 「還會不會再試、多久之後」必須在寫這一行之前決定 —— 那正是讀到這一行的人接著要問的事。
+                    // Whether there is another attempt and when has to be settled before this line is written: it
+                    // is the next thing anyone reading it asks.
+                    var backoff = attempt < backoffs.Count ? backoffs[attempt] : (TimeSpan?)null;
+                    var retryAt = backoff is { } wait ? _timeProvider.GetUtcNow() + wait : (DateTimeOffset?)null;
+                    var retrying = retryAt is { } instant && instant < nextDue;
+
+                    BinanceUserDataLog.RenewalFailed(
+                        _logger,
+                        failures,
+                        kept.Error!.Code,
+                        elapsed,
+                        DescribeNextAttempt(retrying ? backoff : null));
+
+                    // 續期失敗不會立刻讓串流停掉 —— 憑證還有效期可以撐,而下一次嘗試多半會成功。
                     // 但它一定要被看見:連續失敗到憑證過期,帳戶事件就會整個消失,
-                    // 而在那之前這是唯一的預告。
+                    // 而在那之前這是唯一的預告。每一次嘗試各報一次,不是整輪只報一次:
+                    // 上層要看到的是「失敗了幾次」,而重試把那個數字藏起來正是這裡最不該做的事。
                     // A failed renewal does not stop the stream at once: the credential still has time left and
-                    // the next attempt usually succeeds. It must still be seen — enough consecutive failures
-                    // and account events disappear altogether, and until then this is the only warning.
+                    // the next attempt usually succeeds. It must still be seen — enough consecutive failures and
+                    // account events disappear altogether, and until then this is the only warning. Every attempt
+                    // reports, not one report per round: what matters upstairs is how many failed, and hiding that
+                    // behind the retries is the one thing this must not do.
                     Broadcast(BinanceUserDataErrors.Decorate(kept.Error!, _endpoints));
+
+                    if (!retrying)
+                    {
+                        break;
+                    }
+
+                    await DelayUntilAsync(retryAt!.Value, cancellationToken).ConfigureAwait(false);
                 }
+
+                // 整輪跑完若已經超過下一個排程時刻(某一次 PUT 卡了很久就會這樣),不要照著補完積欠的那幾次
+                // —— 那是一串連發的請求,而限流正是續期會失敗的原因之一。從現在重新排一個週期就好。
+                // When a whole round overruns the next scheduled instant — which a long-hanging PUT does — the
+                // missed renewals are not made up: that would be a burst of requests, and the rate limiter is
+                // among the reasons a renewal fails at all. The cadence simply restarts from now.
+                var now = _timeProvider.GetUtcNow();
+
+                due = nextDue > now ? nextDue : now + interval;
             }
         }
         catch (OperationCanceledException)
@@ -875,6 +1048,160 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
             // The cancellation comes from DisposeAsync and is a normal shutdown.
         }
     }
+
+    /// <summary>
+    /// 等到指定的時刻;已經過了就不等。
+    /// Waits until an instant, and not at all when it has already passed.
+    /// </summary>
+    /// <param name="instant">要等到的時刻。The instant to wait for.</param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>等待的工作。The waiting task.</returns>
+    /// <remarks>
+    /// 用「等到某一刻」而不是「等多久」,續期的節奏才不會被每一次往返的耗時一點一點往後推;
+    /// 一天下來那個累積量是實打實的,而憑證的有效期不會跟著延長。
+    /// Waiting until an instant rather than for a duration keeps the renewal cadence from drifting later by the
+    /// cost of every round trip; over a day that accumulates for real, and the credential's validity does not
+    /// stretch to match.
+    /// </remarks>
+    private async Task DelayUntilAsync(DateTimeOffset instant, CancellationToken cancellationToken)
+    {
+        var delay = instant - _timeProvider.GetUtcNow();
+
+        if (delay > TimeSpan.Zero)
+        {
+            await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// 說明續期失敗之後接下來會怎麼做。
+    /// Describes what happens after a failed renewal.
+    /// </summary>
+    /// <param name="backoff">
+    /// 下一次重試前要等多久;這一輪不再重試時為 <see langword="null"/>。
+    /// How long until the next retry, or <see langword="null"/> when this round retries no further.
+    /// </param>
+    /// <returns>雙語說明。The bilingual description.</returns>
+    private static string DescribeNextAttempt(TimeSpan? backoff) =>
+        backoff is { } wait
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"{wait.TotalSeconds:F0} 秒後重試 / retrying in {wait.TotalSeconds:F0} seconds")
+            : "這一輪不再重試,等下一次排程續期 / no further retry this round, waiting for the next scheduled renewal";
+
+    /// <summary>
+    /// 記下「有了一把新憑證」。
+    /// Records that a new credential is in hand.
+    /// </summary>
+    private void RecordCredentialCreated()
+    {
+        lock (_statusGate)
+        {
+            _credentialCreatedAt = _timeProvider.GetUtcNow();
+            _lastRenewedAt = null;
+            _consecutiveRenewalFailures = 0;
+        }
+    }
+
+    /// <summary>
+    /// 記下一次成功的續期。
+    /// Records one successful renewal.
+    /// </summary>
+    /// <returns>
+    /// 成功續期的累計次數,以及距上次建立或成功續期幾分鐘。
+    /// The running count of successful renewals and how many minutes had passed since the credential was created
+    /// or last renewed.
+    /// </returns>
+    /// <remarks>
+    /// 「距上次幾分鐘」在鎖內、更新之前算好再回傳,而不是讓呼叫端事後自己讀一次快照相減 ——
+    /// 那之間可能已經又跑過一次續期,算出來的就不是這一次的間隔。
+    /// The gap is computed inside the lock and before the update rather than left to the caller to derive from a
+    /// later snapshot: another renewal can have run in between, and the number would then belong to neither.
+    /// </remarks>
+    private (int RenewalCount, double MinutesSinceLastRenewal) RecordRenewalSucceeded()
+    {
+        lock (_statusGate)
+        {
+            var now = _timeProvider.GetUtcNow();
+            var previous = _lastRenewedAt ?? _credentialCreatedAt;
+
+            _renewalCount++;
+            _consecutiveRenewalFailures = 0;
+            _lastRenewedAt = now;
+
+            return (_renewalCount, previous is { } instant ? (now - instant).TotalMinutes : 0d);
+        }
+    }
+
+    /// <summary>
+    /// 記下一次失敗的續期。
+    /// Records one failed renewal.
+    /// </summary>
+    /// <returns>這是連續第幾次失敗。Which consecutive failure this is.</returns>
+    private int RecordRenewalFailed()
+    {
+        lock (_statusGate)
+        {
+            return ++_consecutiveRenewalFailures;
+        }
+    }
+
+    /// <summary>
+    /// 記下一次憑證與連線的重建。
+    /// Records one rebuild of the credential and the connection.
+    /// </summary>
+    private void RecordRebuild()
+    {
+        lock (_statusGate)
+        {
+            _rebuildCount++;
+        }
+    }
+
+    /// <summary>
+    /// 把憑證失效當下的完整履歷寫進日誌。
+    /// Writes the credential's whole history at the moment it lapsed.
+    /// </summary>
+    /// <remarks>
+    /// 這裡一個字都不會提到憑證本身 —— 寫出去的只有時刻、分鐘數與次數。
+    /// Not a character of the credential appears here: what goes out is instants, minutes, and counts.
+    /// </remarks>
+    private void LogCredentialExpired()
+    {
+        if (_logger is null)
+        {
+            return;
+        }
+
+        var status = ListenKeyStatus;
+        var now = _timeProvider.GetUtcNow();
+
+        BinanceUserDataLog.CredentialExpired(
+            _logger,
+            Describe(status.CreatedAt),
+            status.CreatedAt is { } createdAt ? (now - createdAt).TotalMinutes : 0d,
+            Describe(status.LastRenewedAt),
+
+            // 這一格後面緊接著「分鐘」,所以沒有值時放一個破折號,而不是整句「尚未發生」——
+            // 後者會讓那一段讀成「距今(尚未發生)分鐘」。憑證從沒續期成功過這件事,前一格已經說了。
+            // The unit follows immediately, so an absent value is a dash rather than the whole "never" phrase,
+            // which would read as "(never) minutes ago". That the credential was never renewed is already said by
+            // the slot before this one.
+            status.LastRenewedAt is { } renewedAt
+                ? ((now - renewedAt).TotalMinutes).ToString("F1", CultureInfo.InvariantCulture)
+                : "-",
+            status.RenewalCount,
+            status.ConsecutiveRenewalFailures);
+    }
+
+    /// <summary>
+    /// 把一個可能沒有值的時刻寫成字串。
+    /// Renders an instant that may not exist.
+    /// </summary>
+    /// <param name="instant">時刻,沒有時為 <see langword="null"/>。The instant, or <see langword="null"/>.</param>
+    /// <returns>ISO 8601 的時刻,或「沒發生過」。The instant in ISO 8601, or a note saying it never happened.</returns>
+    private static string Describe(DateTimeOffset? instant) =>
+        instant is { } value ? value.ToString("O", CultureInfo.InvariantCulture) : NeverHappened;
 
     /// <summary>
     /// 產生下一則心跳訊息。

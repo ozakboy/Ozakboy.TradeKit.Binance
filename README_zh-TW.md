@@ -187,6 +187,12 @@ await client.PlaceOrderAsync(request, ct);
 所以同一種事件訂閱兩次,兩邊都拿到完整的一份。串流替你處理的事:
 
 - **listenKey 全程代管。** 第一次訂閱時建立、每 30 分鐘續期、過期時自動重建、釋放時刪除。
+  續期失敗不會空等下一個三十分鐘,而是以短退避重試(預設 1、2、4 分鐘,見
+  `BinanceUserDataStreamOptions.ListenKeyRenewalRetryBackoffs`),而且重試絕不推遲下一次排程續期。
+- **憑證的生命週期看得見。** 續期成功、續期失敗與收到 `listenKeyExpired` 各有一行日誌
+  (失敗那行只帶中立錯誤碼,失效那行帶憑證建立於何時、活了多久、最後一次成功續期是什麼時候),
+  次數與時刻另以 `feed.ListenKeyStatus` 公開成一份唯讀快照,可以直接放進健康度畫面。
+  **這些日誌與快照都不含 listenKey**,而且結構上放不下它。
 - **每一個缺口都會通知。** 重連或憑證過期都會在 `SubscribeResyncSignalsAsync` 送出 `ResyncRequired`。
   缺口期間的事件交易所不補送,所以兩種都要做全量對帳。
 - **跟不上的訂閱者以失敗結束,不會靜默漏事件。** 那筆失敗的 `IsTransient` 為 `false`,
@@ -455,6 +461,11 @@ dotnet test --filter "TestCategory=MainnetPublic"                          # 主
   而字面替換連沒有名字的位置也攔得到 —— 位址的路徑段、其他套件已經格式化好的訊息、例外文字。
   走 `AddBinanceUserData` 會自動接上;自行建構時請用接受 `SecretMasker` 的建構式多載,
   遮罩器以 `provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)` 取得(必須是同一個實例)。
+- 憑證生命週期的那三行日誌(續期成功、續期失敗、`listenKeyExpired`)與 `ListenKeyStatus` 快照
+  **都放不下 listenKey**:傳進去的只有時刻、次數、毫秒數與中立錯誤碼。這一點是刻意的 ——
+  本套件自己寫出去的日誌**不**經過 `Ozakboy.Http` 的遮罩器(那一道遮的是它自己的請求日誌與錯誤),
+  所以這一層唯一的保護就是根本不把憑證傳進去。續期失敗那一行只寫中立錯誤碼、不轉述交易所的回應原文,
+  因為這個端點的回應本體在正常情況下就是憑證。
 - 憑證由宿主注入、由 `Ozakboy.Http` 的 `SigningOptions` 承載,本套件只在簽章當下讀取。
 - API 金鑰與密鑰登記在這個用戶端的遮罩器上,REST 用戶端回傳的錯誤 —— 訊息、每一筆 `Error.Data`、例外文字 ——
   都不會帶著它們,即使交易所或傳輸層例外把它們 echo 回來也一樣。

@@ -45,7 +45,14 @@ public sealed class BinanceUserDataFeedTests
         // 另一邊就會少掉整條資訊,而少掉的那一邊不會有任何徵兆。
         // One ORDER_TRADE_UPDATE is both a state change and a fill. Feeding only one stream leaves the other
         // missing that information entirely, with nothing on that side to show for it.
-        var connection = new FakeWebSocketConnection([UserDataSamples.OrderPartiallyFilled]);
+        // 劇本先留空,兩個訂閱者都登記完才把事件放上去。第一次 MoveNextAsync 不只是登記訂閱者,
+        // 它還會同步跑完建立憑證、握手與啟動讀取迴圈 —— 所以「建構式就排好一則事件」時,
+        // 那一則可能在它回來之前就已經分送完畢,而第二個訂閱者還沒登記。
+        // The script starts empty and the event goes on only once both subscribers are registered. The first
+        // MoveNextAsync does more than register: it synchronously creates the credential, completes the
+        // handshake, and starts the read loop, so a frame queued in the constructor can be dispatched before it
+        // returns — with the second subscriber not yet registered.
+        var connection = new FakeWebSocketConnection([]);
         var (feed, _, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
 
         using (http)
@@ -55,12 +62,13 @@ public sealed class BinanceUserDataFeedTests
                 var orders = feed.SubscribeOrderUpdatesAsync().GetAsyncEnumerator();
                 var trades = feed.SubscribeTradeUpdatesAsync().GetAsyncEnumerator();
 
-                // 兩個訂閱者都要在第一則事件送達之前登記完。訂閱的登記是同步發生的,
-                // 所以兩次 MoveNextAsync 一起發動就夠了。
-                // Both subscribers must be registered before the first event arrives. Registration happens
-                // synchronously, so issuing both MoveNextAsync calls together is enough.
                 var orderMove = orders.MoveNextAsync();
                 var tradeMove = trades.MoveNextAsync();
+
+                // 登記是在迭代器主體的第一個 await 之前同步完成的,所以這兩行回來之後,兩個訂閱者都在名單上了。
+                // Registration happens synchronously before the iterator body's first await, so once these two
+                // statements have returned both subscribers are on the list.
+                connection.Enqueue(UserDataSamples.OrderPartiallyFilled);
 
                 try
                 {
@@ -86,10 +94,11 @@ public sealed class BinanceUserDataFeedTests
         // 但都不覺得自己漏了」。
         // A shared queue splits the events between the two consumers, and the symptom of that is both sides
         // seeing half of them and neither noticing anything is missing.
-        var connection = new FakeWebSocketConnection([
-            UserDataSamples.OrderNew,
-            UserDataSamples.OrderPartiallyFilled,
-        ]);
+        // 劇本先留空,兩個訂閱者都登記完才放事件上去 —— 理由同
+        // AFillFeedsTheOrderStreamAndTheTradeStreamAtOnce:第一次 MoveNextAsync 會順便啟動整條串流。
+        // The script starts empty and the events go on once both subscribers are registered, for the same reason
+        // as in AFillFeedsTheOrderStreamAndTheTradeStreamAtOnce: the first MoveNextAsync starts the whole feed.
+        var connection = new FakeWebSocketConnection([]);
 
         var (feed, _, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
 
@@ -102,6 +111,9 @@ public sealed class BinanceUserDataFeedTests
 
                 var firstMove = first.MoveNextAsync();
                 var secondMove = second.MoveNextAsync();
+
+                connection.Enqueue(UserDataSamples.OrderNew);
+                connection.Enqueue(UserDataSamples.OrderPartiallyFilled);
 
                 try
                 {
@@ -675,7 +687,7 @@ public sealed class BinanceUserDataFeedTests
         // 帳戶同時只有一把 listenKey。建出第二把不是多一條串流,而是把第一把的效期一起改掉。
         // An account holds one listenKey at a time. Creating a second is not another stream; it changes the
         // validity of the first.
-        var connection = new FakeWebSocketConnection([UserDataSamples.OrderPartiallyFilled]);
+        var connection = new FakeWebSocketConnection([]);
         var factory = new FakeWebSocketConnectionFactory(connection);
 
         var (feed, stub, http) = UserDataFixture.Create(factory);
@@ -689,6 +701,11 @@ public sealed class BinanceUserDataFeedTests
 
                 var orderMove = orders.MoveNextAsync();
                 var tradeMove = trades.MoveNextAsync();
+
+                // 兩個訂閱者都登記完才放事件上去,否則先啟動的那一次可能已經把它分送掉了。
+                // The event goes on only once both are registered; otherwise the one that started the feed may
+                // already have dispatched it.
+                connection.Enqueue(UserDataSamples.OrderPartiallyFilled);
 
                 try
                 {
@@ -710,10 +727,7 @@ public sealed class BinanceUserDataFeedTests
     [TestMethod]
     public async Task EndingOneSubscriptionDoesNotCloseTheSharedConnection()
     {
-        var connection = new FakeWebSocketConnection([
-            UserDataSamples.OrderNew,
-            UserDataSamples.OrderPartiallyFilled,
-        ]);
+        var connection = new FakeWebSocketConnection([]);
 
         var (feed, stub, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
 
@@ -726,6 +740,11 @@ public sealed class BinanceUserDataFeedTests
 
                 var orderMove = orders.MoveNextAsync();
                 var tradeMove = trades.MoveNextAsync();
+
+                // 兩個訂閱者都登記完才放事件上去。
+                // The events go on only once both subscribers are registered.
+                connection.Enqueue(UserDataSamples.OrderNew);
+                connection.Enqueue(UserDataSamples.OrderPartiallyFilled);
 
                 try
                 {

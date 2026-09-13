@@ -8,6 +8,141 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-09-14
+
+串流憑證的生命週期從這一版起看得見。續期成功、續期失敗、憑證失效各有一行日誌,次數與時刻另以
+`BinanceUserDataFeed.ListenKeyStatus` 公開成一份唯讀快照;續期失敗不再空等下一個三十分鐘,而是以短退避重試。
+公開 API 只有新增(具體型別多一個屬性、設定多一個選項),`IUserDataFeed` 沒有變更,升級不需要改呼叫端程式碼。
+The stream credential's lifecycle becomes visible in this release: a line for a successful renewal, one for a
+failed renewal, and one for an expiry, with the counts and instants also exposed as a read-only snapshot on
+`BinanceUserDataFeed.ListenKeyStatus`; a failed renewal no longer waits out the next thirty minutes but retries
+after a short backoff. The public API only gains members — one property on the concrete type and one setting —
+`IUserDataFeed` is unchanged, and upgrading needs no caller changes.
+
+### 新增功能 / Added
+
+- **續期有日誌了 / Renewals are logged**:這一版之前,`PUT /fapi/v1/listenKey` **完全沒有**日誌、也沒有任何計數。
+  24 小時長跑時串流在 21 小時 24 分後收到 `listenKeyExpired`、套件自動重建 —— 但「30 分鐘一次的續期為什麼撐不到
+  60 分鐘的有效期」在現場答不出來:是幣安對單一憑證另有壽命上限,還是某幾次 `PUT` 失敗了而沒有人知道?
+  兩者在日誌與畫面上長得一模一樣。現在三行日誌各自回答一件事:
+  Until this release the renewal endpoint wrote **no** log line and kept no count. On a 24-hour run the stream
+  received a `listenKeyExpired` after 21 hours 24 minutes and rebuilt itself, and nothing on hand could say why a
+  renewal every 30 minutes failed to keep a 60-minute credential alive — a ceiling of Binance's own, or some
+  `PUT`s failing unseen? The two looked identical. Three lines now separate them:
+
+  - 成功(Information):累計第幾次、耗時幾毫秒、距上次建立或續期幾分鐘。
+    Success: the running count, the round trip in milliseconds, and the minutes since the credential was created
+    or last renewed.
+  - 失敗(Warning):連續第幾次失敗、**中立錯誤碼**(只有代碼,不含交易所回應原文 —— 這個端點的回應本體正常
+    情況下就是憑證)、耗時,以及接下來會不會再試、多久之後。
+    Failure: which consecutive failure this is, the **neutral error code** alone — never the exchange's own text,
+    because the body of this endpoint is the credential in the normal case — the elapsed time, and whether and
+    when another attempt follows.
+  - 收到 `listenKeyExpired`(Warning):憑證建立於何時、活了幾分鐘、最後一次成功續期是什麼時候、距今多久、
+    累計成功續期幾次、目前連續失敗幾次。**這一行就是用來回答上面那個問題的** —— 最後一次成功續期才過幾分鐘、
+    連續失敗是 0,那就是憑證本身有壽命上限;連續失敗不是 0,就是那幾次 `PUT` 沒送成功。
+    The expiry line carries the whole history that explains it, and a recent successful renewal with no
+    consecutive failures points at a ceiling of the credential's own while a non-zero count points at the `PUT`s.
+
+  **沒有一行帶得到 listenKey**:傳進去的只有時刻、次數、毫秒數與中立錯誤碼,型別上就沒有一個參數放得下憑證。
+  本套件自己寫出去的日誌**不**經過 `Ozakboy.Http` 的遮罩器(那一道遮的是它自己的請求日誌與錯誤),
+  所以這一層唯一的保護就是「根本不把憑證傳進來」。既有的憑證外洩測試已經把這幾行一併收進斷言。
+  **No line can carry the listenKey**: every parameter is an instant, a count, a duration, or a neutral code.
+  What this package logs itself does **not** pass through the `Ozakboy.Http` masker, which covers its own request
+  logs and errors, so never handing the credential over is the only protection at this layer — and the existing
+  credential-leak test now collects these lines along with everything else.
+
+- **`BinanceUserDataFeed.ListenKeyStatus` 唯讀快照 / A read-only `ListenKeyStatus` snapshot**:
+  新型別 `BinanceListenKeyStatus`,五個成員 —— `CreatedAt`(目前這一把憑證的建立時刻)、
+  `LastRenewedAt`(最後一次**成功**續期)、`RenewalCount`(成功續期的累計次數)、
+  `ConsecutiveRenewalFailures`(目前連續失敗幾次,成功即歸零)、`RebuildCount`(因憑證失效而重建的次數)。
+  每次讀都在鎖內取出一份不會再變的複本,所以幾個欄位彼此一致,不會出現「次數加了、時刻還沒跟上」的組合。
+  重建憑證會把 `CreatedAt` 換成新那一把的時刻、把 `LastRenewedAt` 清空、連續失敗次數歸零,
+  因為那些讀數屬於**某一把**憑證;`RenewalCount` 與 `RebuildCount` 則是整個串流生命週期的累計值。
+  A new `BinanceListenKeyStatus` carries the creation instant of the credential in use, the last **successful**
+  renewal, the running renewal count, the current consecutive failure count, and the number of rebuilds. Each
+  read takes an immutable copy under the lock so the members agree with one another. A rebuild restarts the
+  per-credential readings while the two counts run for the feed's whole life.
+
+  **刻意只加在具體型別上,`IUserDataFeed` 沒有變更。** 那是跨交易所的契約,而 listenKey 是幣安這一家的機制,
+  別家的串流憑證未必有續期這回事;推上介面等於要求每一家都長出一個它沒有的概念。
+  `AddBinanceUserData` 本來就以具體型別與介面登記同一個單例,宿主要呈現健康度時取具體型別即可。
+  **Deliberately on the concrete type alone.** `IUserDataFeed` is a cross-exchange contract and the listenKey is
+  Binance's own mechanism; another exchange's credential may have no renewal at all. `AddBinanceUserData` already
+  registers one singleton behind both the type and the interface, so a host reads it from the type.
+
+### 問題修正 / Fixed
+
+- **續期失敗之後會重試,不再空等下一個三十分鐘 / A failed renewal is retried instead of waiting out the next
+  thirty minutes**:續期週期是有效期的一半,原本的理由是「容許連續失敗一次」—— 但失敗之後什麼都不做、
+  等下一個排程,那一把憑證就**只剩最後一次機會**;那一次再失敗,憑證過期、串流斷掉,缺口期間的委託與成交
+  交易所不補送。續期失敗的原因多半是網路抖動或限流,一分鐘後再打一次多半就成功了。
+  現在失敗之後依 `BinanceUserDataStreamOptions.ListenKeyRenewalRetryBackoffs`(預設 1、2、4 分鐘)重試,
+  清單用完就停,等下一個排程續期 —— 一直重打一個持續回絕的端點只會撞上限流,而限流正是它一開始失敗的原因之一。
+  The interval is half the lifetime to leave room for one failure, but doing nothing after that failure left the
+  credential exactly one more chance, and losing it means an expired credential, a dropped stream, and a gap the
+  exchange never replays. Retries now follow `ListenKeyRenewalRetryBackoffs` — one, two, then four minutes by
+  default — and stop once the list runs out, because hammering an endpoint that keeps refusing only runs into the
+  rate limiter that may have caused the failure.
+
+  **重試絕不推遲下一個排程續期。** 每一輪開始前先算好下一個排程時刻,退避會跨過它就不再重試,直接把機會留給
+  排程的那一次;否則「續期愈失敗、下一次排程愈晚」,而愈失敗正是愈該早一點再試的時候,方向剛好相反。
+  每一次嘗試各在串流上報一筆失敗,不是整輪只報一次:上層要看到的是失敗了幾次,而重試把那個數字藏起來
+  正是這裡最不該做的事。
+  **A retry never pushes the scheduled renewal back.** The next scheduled instant is fixed before the wait and a
+  backoff that would cross it is skipped, since the more renewals fail the sooner the next attempt should be, not
+  the later. Every attempt still reports its own failure on the stream rather than one report per round, because
+  how many failed is exactly what the layer above needs to see.
+
+### 技術改進 / Changed
+
+- **一條時好時壞的測試,根因是測試對啟動時機的假設錯了 / A flaky test rested on a wrong assumption about when
+  the feed starts**:`BinanceUserDataFeedTests.AFillFeedsTheOrderStreamAndTheTradeStreamAtOnce` 全套平行跑時
+  三次會逾時一次,單獨跑六次全綠。原本的註解寫著「訂閱的登記是同步發生的,所以兩次 `MoveNextAsync` 一起發動
+  就夠了」—— 登記確實是同步的,但**第一次 `MoveNextAsync` 不只是登記**:它在迭代器主體的第一個 await
+  之前同步跑完建立憑證、握手與啟動背景讀取迴圈。假連線的劇本在建構式就排好了那一則事件,
+  所以它可能在第一次 `MoveNextAsync` 回來之前就已經分送完畢,而第二個訂閱者還沒登記 ——
+  然後第二條串流等到 15 秒逾時。32 個平行 worker 讓那個縫被撞到的機率剛好高得看得見。
+  改法是劇本先留空,兩個訂閱者都登記完之後才用新增的 `FakeWebSocketConnection.Enqueue` 把事件放上去,
+  競態就不存在;**不加重試、不加長逾時**。同一個形狀的三條測試
+  (`TwoSubscribersToTheSameEventEachReceiveTheirOwnCompleteCopy`、
+  `TwoSubscriptionsShareOneCredentialAndOneConnection`、
+  `EndingOneSubscriptionDoesNotCloseTheSharedConnection`)一併改掉,它們原本帶著同一顆未爆彈。
+  被測程式沒有問題:「訂閱之前發生的事件不補送」正是 `IUserDataFeed` 明訂的語意。
+  The test timed out roughly once in three full parallel runs and never on its own. Registration is synchronous,
+  but the first `MoveNextAsync` also creates the credential, completes the handshake, and starts the read loop
+  before its first await — so a frame queued in the fake connection's constructor could be dispatched before that
+  call returned, with the second subscriber not yet registered. The scripts now start empty and the frames go on
+  through a new `FakeWebSocketConnection.Enqueue` once both subscribers are registered; no retry and no longer
+  timeout was added, and three sibling tests carrying the same latent race were fixed the same way. The code under
+  test is correct: not replaying what happened before a subscription is `IUserDataFeed`'s documented behaviour.
+
+- **新測試 / New tests**:`BinanceUserDataListenKeyStatusTests` 涵蓋快照的初始狀態、續期計數與時刻、
+  失敗計數與成功後歸零、重建計數與新憑證的生命週期重置、三行日誌各自的內容(而且每一條都斷言日誌裡沒有憑證)、
+  一個續期週期內的退避重試,以及「退避不得跨過下一個排程時刻」。
+  `BinanceUserDataStreamOptionsTests` 另加三條驗證退避清單的規則。
+  **這一組被故意弄壞驗證過**:把 `RecordRenewalSucceeded` 裡的 `_renewalCount++` 拿掉,
+  110 條使用者資料測試裡恰好 3 條變紅,而且紅的正是依賴那個計數的三條
+  (`TheRenewalCountAndTimestampsAreVisibleOnTheStatusSnapshot`、
+  `ASuccessfulRenewalIsLoggedWithoutTheCredential`、
+  `AFailedRenewalIsCountedAndSuccessClearsTheConsecutiveCount`);改回來全綠。
+  A new test class covers the snapshot, the counters, the three log lines with a no-credential assertion on each,
+  the backoff retries within one renewal period, and the rule that a retry never crosses the next scheduled
+  instant; the options tests gain three rules for the backoff list. **Verified by deliberately breaking it**:
+  removing `_renewalCount++` turned exactly three of the 110 user data tests red — the three that depend on that
+  count — and restoring it turned them green.
+
+  離線測試 755 個全綠,Release 建置 0 警告;2026-09-14 帶 Testnet 憑證依 CI 篩選
+  (`TestCategory!=MainnetPublic`)跑 775 個全綠、無略過,其中 `TestCategory=Testnet` 的真實連線測試 20 個。
+  全套平行連跑五次沒有任何一次紅燈。
+  755 offline tests pass with no warnings in the Release build; on 2026-09-14 the CI filter with testnet
+  credentials ran 775 tests green with none skipped, 20 of them against a live connection, and five consecutive
+  full parallel runs produced no failure.
+
+- **相依 / Dependencies**:沒有變更。`dotnet list package --include-transitive` 仍只有 Microsoft.\*、System.\*
+  與 Ozakboy.\*。
+  Unchanged; the transitive graph still contains only Microsoft.\*, System.\*, and Ozakboy.\* packages.
+
 ## [0.1.3] - 2026-09-13
 
 使用者資料串流的 listenKey 在**取得的當下**就登記成遮罩器的已知祕密。它原本只有「結構上不進任何錯誤與日誌」
@@ -500,6 +635,7 @@ data stream — built on `Ozakboy.Http` and `Ozakboy.WebSockets` with no third-p
   填進去等於用錯的值冒充事實。下一階段接上 `leverageBracket` 後補齊。
   `exchangeInfo` does not carry a leverage ceiling, and deriving one would pass a wrong number off as fact.
 
+[0.1.4]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.4
 [0.1.3]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.3
 [0.1.1]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.0

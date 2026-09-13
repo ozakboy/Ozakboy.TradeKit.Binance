@@ -85,6 +85,15 @@ public sealed class BinanceUserDataCredentialLeakTests
         var third = new FakeWebSocketConnection([UserDataSamples.MarginCall]);
         var factory = new FakeWebSocketConnectionFactory(first, second, third);
 
+        // 0.1.4 起憑證的生命週期會寫日誌(續期成功、續期失敗、收到 listenKeyExpired),
+        // 而這條串流自己寫出去的日誌<b>不</b>經過 Ozakboy.Http 的遮罩器 —— 那一道遮的是它自己的請求日誌與錯誤。
+        // 所以這幾行也要一起收進來:它們是這條串流新增的一條「產生文字」的路。
+        // Since 0.1.4 the credential lifecycle writes log lines — renewal succeeded, renewal failed,
+        // listenKeyExpired received — and what this stream logs itself does <b>not</b> pass through the
+        // Ozakboy.Http masker, which covers its own request logs and errors. Those lines are therefore collected
+        // too: they are a new route by which this stream produces text.
+        var loggers = new CollectingLoggerFactory();
+
         var (feed, stub, http) = UserDataFixture.Create(
             factory,
             new BinanceUserDataStreamOptions
@@ -100,7 +109,8 @@ public sealed class BinanceUserDataCredentialLeakTests
             },
             Canary,
             keepAliveResponder: static () =>
-                $$"""{"code":-1125,"msg":"This listenKey does not exist.","listenKey":"{{Canary}}"}""");
+                $$"""{"code":-1125,"msg":"This listenKey does not exist.","listenKey":"{{Canary}}"}""",
+            loggerFactory: loggers);
 
         var texts = new ConcurrentBag<string>();
 
@@ -151,6 +161,21 @@ public sealed class BinanceUserDataCredentialLeakTests
                 {
                     texts.Add(sent);
                 }
+            }
+
+            // 憑證生命週期的日誌行同樣算數,而且要先確認它們真的寫出來了 ——
+            // 一份空的日誌「沒有憑證」是必然的,那不能拿來當作遮得住的證據。
+            // The credential lifecycle's log lines count too, and they have to be confirmed present first: an
+            // empty log trivially contains no credential, which proves nothing about whether it is kept out.
+            Assert.Contains(
+                "續期失敗",
+                string.Join('\n', loggers.Messages),
+                StringComparison.Ordinal,
+                "憑證生命週期的日誌一行都沒寫出來,這一段等於沒有被檢查。");
+
+            foreach (var message in loggers.Messages)
+            {
+                texts.Add(message);
             }
         }
 

@@ -48,6 +48,36 @@ public sealed class BinanceUserDataStreamOptions
     public static readonly TimeSpan DefaultListenKeyKeepAliveInterval = TimeSpan.FromMinutes(30);
 
     /// <summary>
+    /// 續期失敗後的重試退避,預設 1、2、4 分鐘。
+    /// The backoffs between retries of a failed renewal: one, two, and four minutes by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>沒有重試的話,60 分鐘的有效期只剩一次機會。</b> 續期週期是 30 分鐘,失敗之後若什麼都不做、
+    /// 等下一個 30 分鐘,那一把憑證就只剩最後一次續期的機會;那一次再失敗,憑證就過期,
+    /// 帳戶事件整個消失,而缺口期間的委託與成交交易所不補送。續期失敗的原因多半是網路抖動或限流,
+    /// 一分鐘後再打一次多半就成功了。
+    /// <b>Without retries a 60-minute credential gets one more chance.</b> The renewal runs every 30 minutes, so
+    /// doing nothing after a failure leaves exactly one attempt before the credential lapses, the account events
+    /// stop, and the exchange replays nothing from the gap. A renewal usually fails because of a network hiccup
+    /// or the rate limiter, and a minute later it usually succeeds.
+    /// </para>
+    /// <para>
+    /// 退避從短開始:第一次失敗一分鐘後就重試,而不是三十分鐘後。清單用完就停,等下一個排程續期 ——
+    /// 一直重打一個持續回絕的端點只會撞上限流,而限流正是它一開始失敗的原因之一。
+    /// The backoffs start short — a minute after the first failure rather than another thirty — and stop once the
+    /// list runs out, leaving the next scheduled renewal to try again. Hammering an endpoint that keeps refusing
+    /// only runs into the rate limiter, which is one of the reasons it refused in the first place.
+    /// </para>
+    /// </remarks>
+    public static readonly IReadOnlyList<TimeSpan> DefaultListenKeyRenewalRetryBackoffs =
+    [
+        TimeSpan.FromMinutes(1),
+        TimeSpan.FromMinutes(2),
+        TimeSpan.FromMinutes(4),
+    ];
+
+    /// <summary>
     /// 心跳間隔的預設值,與行情串流相同。
     /// The default heartbeat interval, the same as the market stream's.
     /// </summary>
@@ -65,6 +95,23 @@ public sealed class BinanceUserDataStreamOptions
     /// How often the stream credential is renewed.
     /// </summary>
     public TimeSpan ListenKeyKeepAliveInterval { get; set; } = DefaultListenKeyKeepAliveInterval;
+
+    /// <summary>
+    /// 續期失敗之後,依序等多久再重試一次。空清單表示不重試。
+    /// How long to wait before each retry of a failed renewal, in order. An empty list disables retrying.
+    /// </summary>
+    /// <remarks>
+    /// <b>重試一律不越過下一個排程續期時刻。</b> 某一次退避會跨過那個時刻時就不再重試,直接把機會留給排程的那一次
+    /// —— 否則重試會把下一次續期往後推,而「續期愈失敗、下一次愈晚」正好是最不該發生的方向。
+    /// 清單套用在<b>每一個</b>續期週期上,一個週期內最多重試 <c>Count</c> 次,下一個週期重新從第一個值開始。
+    /// <b>A retry never runs past the next scheduled renewal.</b> When a backoff would cross that instant, the
+    /// retrying stops and the scheduled attempt takes over: otherwise retries would push the next renewal later,
+    /// and "the more renewals fail, the later the next one runs" is precisely the wrong direction. The list
+    /// applies to <b>each</b> renewal period — at most <c>Count</c> retries within one — and starts again from the
+    /// first value in the next.
+    /// </remarks>
+    public IReadOnlyList<TimeSpan> ListenKeyRenewalRetryBackoffs { get; set; } =
+        DefaultListenKeyRenewalRetryBackoffs;
 
     /// <summary>
     /// 握手逾時。
@@ -207,6 +254,24 @@ public sealed class BinanceUserDataStreamOptions
         {
             return BinanceErrors.InvalidOptions(
                 $"憑證續期週期 {ListenKeyKeepAliveInterval} 必須短於憑證有效期 {ListenKeyLifetime},否則計時器響之前憑證就已經過期。The credential renewal interval {ListenKeyKeepAliveInterval} must be shorter than the credential lifetime {ListenKeyLifetime}, or the credential expires before the timer fires.");
+        }
+
+        if (ListenKeyRenewalRetryBackoffs is null)
+        {
+            return BinanceErrors.InvalidOptions(
+                "續期重試退避清單不可為 null;不要重試請給一個空清單。The renewal retry backoff list must not be null; pass an empty list to disable retrying.");
+        }
+
+        // 零或負值的退避等於不等待就重打,一次網路中斷會變成一串連發的請求,而限流正是續期失敗的原因之一。
+        // A zero or negative backoff is an immediate retry, turning one network outage into a burst of requests —
+        // and the rate limiter is among the reasons a renewal fails in the first place.
+        foreach (var backoff in ListenKeyRenewalRetryBackoffs)
+        {
+            if (backoff <= TimeSpan.Zero)
+            {
+                return BinanceErrors.InvalidOptions(
+                    $"續期重試退避必須為正值,收到 {backoff}。Every renewal retry backoff must be positive; {backoff} was given.");
+            }
         }
 
         if (ConnectTimeout <= TimeSpan.Zero)

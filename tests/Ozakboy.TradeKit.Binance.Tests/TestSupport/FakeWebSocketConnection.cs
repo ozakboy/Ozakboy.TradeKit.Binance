@@ -42,6 +42,25 @@ internal sealed class FakeWebSocketConnection : IWebSocketConnection
     }
 
     /// <summary>
+    /// 把一則訊息接到劇本後面,連線建立之後也可以。
+    /// Appends one frame to the script, including after the connection is live.
+    /// </summary>
+    /// <param name="frame">要送出的訊息。The frame to deliver.</param>
+    /// <remarks>
+    /// <b>要測「兩個訂閱者都收到同一則事件」就非用它不可。</b> 建構式排好的訊息在連線一建立就送得出去,
+    /// 而串流是由<b>第一次</b> <c>MoveNextAsync</c> 啟動的 —— 那一次同步跑完建立憑證、握手與啟動讀取迴圈,
+    /// 所以它回來的時候,第一則事件可能已經分送完畢,第二個訂閱者卻還沒登記。
+    /// 劇本先留空、兩個訂閱者都登記完再 <see cref="Enqueue"/>,那個競態就不存在。
+    /// <b>Testing that two subscribers both receive one event needs this.</b> Frames queued in the constructor
+    /// can go out the moment the connection is live, and the feed is started by the <b>first</b>
+    /// <c>MoveNextAsync</c> — which synchronously creates the credential, completes the handshake, and starts the
+    /// read loop, so by the time it returns the first event may already have been dispatched while the second
+    /// subscriber has yet to register. Leaving the script empty and enqueueing once both are registered removes
+    /// the race entirely.
+    /// </remarks>
+    public void Enqueue(FakeWebSocketFrame frame) => _inbound.Writer.TryWrite(frame);
+
+    /// <summary>
     /// 這條連線收到過哪些送出的內容,依序排列。
     /// What was sent on this connection, in order.
     /// </summary>

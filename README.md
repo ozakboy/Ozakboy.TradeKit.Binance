@@ -197,7 +197,15 @@ bounded queue, so subscribing to the same event twice gives both subscriptions t
 does for you:
 
 - **The listenKey is managed end to end.** Created on the first subscription, renewed every 30 minutes, rebuilt
-  automatically when it expires, and deleted on disposal.
+  automatically when it expires, and deleted on disposal. A failed renewal does not wait out the next thirty
+  minutes: it is retried after a short backoff — one, two, then four minutes by default, see
+  `BinanceUserDataStreamOptions.ListenKeyRenewalRetryBackoffs` — and a retry never pushes the scheduled renewal
+  back.
+- **The credential's lifecycle is visible.** A successful renewal, a failed one, and a `listenKeyExpired` each
+  write a log line — the failure carrying the neutral error code alone, the expiry carrying when the credential
+  was created, how long it lived, and when it was last renewed successfully — and the counts and instants are
+  also exposed as a read-only `feed.ListenKeyStatus` snapshot you can render on a health screen. **Neither the
+  log lines nor the snapshot carry the listenKey**, and structurally neither can.
 - **Every gap is announced.** A reconnect or an expired credential raises a `ResyncRequired` on
   `SubscribeResyncSignalsAsync`. The exchange replays nothing from the gap, so both call for a full
   reconciliation.
@@ -502,6 +510,12 @@ dotnet test --filter "TestCategory=MainnetPublic"                          # pro
   has already formatted, exception text. `AddBinanceUserData` wires it up automatically; when constructing by
   hand, use the overload taking a `SecretMasker`, obtained with
   `provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)` — it has to be that same instance.
+- The three credential-lifecycle log lines — renewal succeeded, renewal failed, `listenKeyExpired` — and the
+  `ListenKeyStatus` snapshot **have nowhere to put a listenKey**: every value is an instant, a count, a
+  duration, or a neutral error code. That is deliberate, because what this package logs itself does **not** pass
+  through the `Ozakboy.Http` masker, which covers its own request logs and errors; never handing the credential
+  over is the only protection at that layer. The failure line carries the neutral code alone and never quotes
+  the exchange's response, whose body is the credential in the normal case.
 - Credentials are injected by the host and carried by `Ozakboy.Http`'s `SigningOptions`; this package reads
   them only at the moment of signing.
 - The API key and secret are registered with the client's masker, so an error returned by the REST client —
