@@ -8,6 +8,80 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-09-13
+
+使用者資料串流的 listenKey 在**取得的當下**就登記成遮罩器的已知祕密。它原本只有「結構上不進任何錯誤與日誌」
+這一道保護;這一版補上字面替換那一道,不管它之後從哪條路徑流出去都會被換成遮罩字串。公開 API 只多一個建構式多載,
+既有的多載沒有變更,走相依注入的宿主不必改任何程式碼。
+The user data stream's listenKey is registered as a known secret **the moment it is obtained**. Until now it was
+protected only structurally — it entered no error and no log — and this release adds literal replacement, so it
+comes out masked whichever route it later leaves by. The public API gains one constructor overload, the existing
+one is unchanged, and a host using dependency injection needs no changes at all.
+
+### 安全 / Security
+
+- **listenKey 一取得就登記成字面祕密 / The listenKey is registered as a literal secret on acquisition**:
+  建立(`POST /fapi/v1/listenKey`)與續期(`PUT`)一讀出憑證,`BinanceListenKeyClient` 立刻以
+  `Ozakboy.Security` 的 `SecretMasker.RegisterKnownSecret` 把它登記到**這個具名用戶端的**遮罩器上,
+  登記發生在值回到呼叫端之前 —— 晚一步就有一段「憑證在手、遮罩器還不認得它」的空窗,而撥號位址正是在那段空窗裡組出來的。
+  原本的保護只有 `BinanceConstants.SensitiveParameterNames` 的欄位名規則,而欄位名規則**看不見沒有欄位名的位置**:
+  位址的路徑段(幣安現貨的使用者資料串流位址就是 `wss://host/ws/<listenKey>`)、其他套件已經格式化好的訊息、例外文字。
+  As soon as a create or a renewal yields the credential, `BinanceListenKeyClient` registers it on **this named
+  client's** masker with `SecretMasker.RegisterKnownSecret`, before the value returns to the caller — a later
+  registration would leave a window in which the credential is in hand and the masker does not know it, and the
+  dialled address is built inside that window. The previous protection was the field-name rule alone, and a
+  field-name rule **cannot see a position that has no name**: a path segment of an address (the Binance spot user
+  data stream dials `wss://host/ws/<listenKey>`), a message another package has already formatted, exception text.
+
+- **續期換發的憑證也登記,舊的那把不移除 / A renewed credential is registered too, and the earlier one is kept**:
+  實測 `PUT` 回的不是官方文件說的空物件而是一把完整的憑證,交易所換發時那會是**另一把**。續期的回應本體因此會被讀出憑證登記,
+  讀不到就略過(文件說的空物件就是這個形狀),而且無論如何都不影響這次續期的成敗判定。
+  舊的那一把刻意留著不移除:`SecretMasker` 只有清空全部的 `ClearKnownSecrets`、沒有移除單一項的 API,就算有也不會用 ——
+  一把已經失效的憑證被多遮一次沒有任何壞處,少遮一次就是外流;帳戶一小時才換一次憑證,清單長不到值得擔心。
+  Measured, the `PUT` returns a full credential rather than the empty object the documentation describes, and on a
+  rotation that is a **different** key, so the renewal body is read for one and registered. A body without one is
+  skipped — the documented empty object has exactly that shape — and either way this never affects whether the
+  renewal is judged to have succeeded. The earlier key is deliberately left registered: `SecretMasker` offers only
+  the clear-everything `ClearKnownSecrets` and no per-value removal, and even with one it would go unused, because
+  masking a lapsed credential once more costs nothing while masking it once less is a leak.
+
+### 新增功能 / Added
+
+- **`BinanceUserDataFeed` 接受 `SecretMasker` 的建構式多載 / A `BinanceUserDataFeed` constructor overload taking a
+  `SecretMasker`**:遮罩器以 `provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)` 取得,
+  必須是**同一個**實例 —— 另建一個新的遮罩器登記得成功,但真正在遮日誌與錯誤的是用戶端的那一個,兩者不同等於什麼都沒做,
+  而且不會有任何跡象。`AddBinanceUserData` 已經自動帶上,走相依注入的宿主不必處理;`AddBinanceFutures` 沒有先跑的話,
+  解析時會以 `InvalidOperationException` 當場失敗,而不是安靜地少掉一道保護。
+  舊多載**維持不變**,但它不登記任何東西,XML 註解已寫明後果。
+  The masker comes from `provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)` and has to be the **same**
+  instance: registering on a freshly built one succeeds while the masker actually covering this client's logs and
+  errors is the client's, so a mismatch achieves nothing and shows no sign of it. `AddBinanceUserData` supplies it
+  automatically; without a prior `AddBinanceFutures`, resolution fails outright with an `InvalidOperationException`
+  rather than quietly going one guard short. The older overload is **unchanged** and registers nothing, which its
+  XML documentation now states.
+
+### 技術改進 / Changed
+
+- **相依 / Dependencies**:新增 `Ozakboy.Security` 0.1.1 的明確引用。`SecretMasker` 進了公開 API,
+  靠 `Ozakboy.Http` 遞移帶進來的話,上游哪天不再帶它,斷的是本套件的編譯。版號與 `Ozakboy.Http` 0.3.0 帶的那一份相同,
+  `dotnet list package --include-transitive` 仍只有 Microsoft.\*、System.\* 與 Ozakboy.\*。
+  `Ozakboy.Security` 0.1.1 is now referenced directly, because a public-API type arriving transitively breaks this
+  package's build the day upstream stops carrying it. The transitive graph still contains only Microsoft.\*,
+  System.\*, and Ozakboy.\* packages.
+
+- **新測試 / New tests**:`BinanceUserDataMaskerRegistrationTests` 驗的是與既有
+  `BinanceUserDataCredentialLeakTests` **不同**的一件事 —— 後者驗「本套件自己產生的文字裡沒有憑證」(結構上的保護),
+  前者驗「憑證即使從本套件管不到的路徑流出去,也會被字面替換攔下來」。涵蓋:取得當下就登記、
+  完整位址寫進日誌之後遮得掉(含欄位名規則完全攔不到的路徑段形式)、續期換發後新舊兩把都遮得到、
+  登記確實落在容器交給這個具名用戶端的那一個遮罩器上,以及兩條對照組(沒有遮罩器時不登記、過短的值略過而不擲例外)。
+  **這一組被故意弄壞驗證過**:拿掉 `CreateAsync` 裡登記的那一行,743 條測試裡恰好 4 條變紅
+  (續期那一半仍綠,因為它是另一個獨立的登記點);改回來全綠。
+  `BinanceUserDataMaskerRegistrationTests` checks something **different** from the existing
+  `BinanceUserDataCredentialLeakTests`: that class checks no text this package produces carries the credential,
+  this one checks that a credential leaving by a route this package does not control is still caught. **Verified by
+  deliberately breaking it**: removing the registration from `CreateAsync` turned exactly four of the 743 tests red
+  and restoring it turned them green.
+
 ## [0.1.2] - 2026-09-12
 
 改用 `Ozakboy.Http` 0.3.0。重試的每一次嘗試都各自排隊等限流許可、各自付權重,並在拿到許可之後以當下時間重新簽章;
@@ -426,5 +500,6 @@ data stream — built on `Ozakboy.Http` and `Ozakboy.WebSockets` with no third-p
   填進去等於用錯的值冒充事實。下一階段接上 `leverageBracket` 後補齊。
   `exchangeInfo` does not carry a leverage ceiling, and deriving one would pass a wrong number off as fact.
 
+[0.1.3]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.3
 [0.1.1]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ozakboy/Ozakboy.TradeKit.Binance/releases/tag/v0.1.0

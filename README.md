@@ -495,6 +495,13 @@ dotnet test --filter "TestCategory=MainnetPublic"                          # pro
 - The user data stream's listenKey reaches the account's private data, so it never appears in an error
   message, `Error.Data`, an exception, or a stream identifier. Frames that carry it (`listenKeyExpired`, and
   every heartbeat reply) are never quoted, and heartbeat replies are recognised and dropped without being read.
+- The listenKey is **registered as a known secret on the masker the moment it is obtained**, on both the create
+  and the renewal, so wherever it turns up afterwards it comes out as the mask segment. This differs from the
+  previous point in reach: a field-name rule sees only named fields of a structured payload, while literal
+  replacement also catches positions that have no name — a path segment of an address, a message another package
+  has already formatted, exception text. `AddBinanceUserData` wires it up automatically; when constructing by
+  hand, use the overload taking a `SecretMasker`, obtained with
+  `provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)` — it has to be that same instance.
 - Credentials are injected by the host and carried by `Ozakboy.Http`'s `SigningOptions`; this package reads
   them only at the moment of signing.
 - The API key and secret are registered with the client's masker, so an error returned by the REST client —

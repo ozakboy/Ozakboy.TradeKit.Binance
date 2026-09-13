@@ -1,6 +1,9 @@
 using System.Net;
 using System.Text;
 
+using Microsoft.Extensions.Logging;
+
+using Ozakboy.Security.Masking;
 using Ozakboy.TradeKit.Binance.Tests.TestSupport;
 using Ozakboy.WebSockets;
 
@@ -40,12 +43,23 @@ internal static class UserDataFixture
     /// <c>PUT</c> 的回應覆寫,未提供時回傳與 <c>POST</c> 同形的成功回應。
     /// An override for the <c>PUT</c> response; without one it answers in the same shape as the <c>POST</c>.
     /// </param>
+    /// <param name="masker">
+    /// 遮罩器,取得的憑證會登記上去。未提供時走沒有遮罩器的建構式多載。
+    /// The masker onto which every credential obtained is registered; without one the overload that takes no
+    /// masker is used.
+    /// </param>
+    /// <param name="loggerFactory">
+    /// 日誌工廠,轉交給連線層。
+    /// The logger factory, handed to the connection layer.
+    /// </param>
     /// <returns>串流、假 HTTP 處理器與底層的 <see cref="HttpClient"/>。The stream, the stub, and the client.</returns>
     public static (BinanceUserDataFeed Feed, StubHttpMessageHandler Stub, HttpClient Http) Create(
         IWebSocketConnectionFactory connectionFactory,
         BinanceUserDataStreamOptions? streamOptions = null,
         string listenKey = UserDataSamples.ListenKey,
-        Func<string>? keepAliveResponder = null)
+        Func<string>? keepAliveResponder = null,
+        SecretMasker? masker = null,
+        ILoggerFactory? loggerFactory = null)
     {
         var options = TestPipeline.CreateOptions(BinanceEnvironment.Testnet);
         var clock = TestClock.AtFixedInstant();
@@ -56,8 +70,9 @@ internal static class UserDataFixture
             new BinanceUserDataFeed(
                 pipeline,
                 options,
+                masker,
                 streamOptions,
-                loggerFactory: null,
+                loggerFactory,
                 timeProvider: clock,
                 connectionFactory: connectionFactory),
             stub,

@@ -24,6 +24,15 @@ namespace Ozakboy.TradeKit.Binance;
 /// credentials</b> — none of which a host that only wants public market data or trading rules should carry.
 /// </para>
 /// <para>
+/// 這一步還會把 <c>AddBinanceFutures</c> 建立的那個遮罩器交給串流,讓執行期取得的 listenKey 一拿到就被登記成
+/// 字面祕密。所以順序不只是「取得設定」而已:沒有前一步就沒有那個遮罩器,解析 <see cref="IUserDataFeed"/> 時會
+/// 以 <see cref="InvalidOperationException"/> 當場失敗,而不是安靜地少掉一道保護。
+/// This step also hands the stream the masker that <c>AddBinanceFutures</c> created, so that a listenKey obtained
+/// at run time is registered as a literal secret the moment it arrives. The ordering is therefore about more than
+/// settings: without the earlier call there is no such masker, and resolving <see cref="IUserDataFeed"/> fails
+/// outright with an <see cref="InvalidOperationException"/> rather than quietly going one guard short.
+/// </para>
+/// <para>
 /// 註冊為單例是設計的一部分,不是慣例:帳戶同時只有一把串流憑證,兩個實例會互相搶那一把
 /// —— 後建立的那個會延長同一把憑證的效期,而任何一方 <c>DELETE</c> 都會把另一方的串流一起弄斷,
 /// 而那一方只會看到「連線莫名其妙斷了」。
@@ -75,9 +84,15 @@ public static class BinanceUserDataServiceCollectionExtensions
 
         services.AddSingleton(streamOptions);
 
+        // 遮罩器一定要從註冊處取回<b>同一個</b>實例:在別的遮罩器上登記 listenKey 會登記成功,
+        // 但真正在遮日誌與錯誤的是這個具名用戶端的那一個,兩者不同等於完全沒有保護,而且沒有任何跡象。
+        // The masker must be the very instance the registration created: registering the listenKey on a different
+        // one succeeds, while the masker actually covering this client's logs and errors is the named client's, so
+        // a mismatch leaves the credential entirely unprotected without a hint that anything is wrong.
         services.AddSingleton(provider => new BinanceUserDataFeed(
             provider.GetRequiredService<HttpPipelineClient>(),
             provider.GetRequiredService<BinanceOptions>(),
+            provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName),
             provider.GetRequiredService<BinanceUserDataStreamOptions>(),
             provider.GetService<ILoggerFactory>(),
             provider.GetService<TimeProvider>(),

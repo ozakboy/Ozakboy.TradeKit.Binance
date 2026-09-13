@@ -1,6 +1,7 @@
 using System.Text.Json;
 
 using Ozakboy.Http.Retry;
+using Ozakboy.Security.Masking;
 
 namespace Ozakboy.TradeKit.Binance.UserData;
 
@@ -40,27 +41,50 @@ namespace Ozakboy.TradeKit.Binance.UserData;
 /// return the empty <c>{}</c> the documentation describes but an object holding the whole credential. Response
 /// handling here therefore extracts only what is needed, and no failure message ever attaches the body.
 /// </para>
+/// <para>
+/// <b>憑證一拿到手就登記成字面祕密。</b> 建立與續期一旦讀出 listenKey,這裡立刻以
+/// <see cref="SecretMasker.RegisterKnownSecret"/> 把它登記到<b>這個具名用戶端的</b>遮罩器上。
+/// 欄位名規則(<see cref="BinanceConstants.SensitiveParameterNames"/>)只作用在結構化的 payload,
+/// 攔不到沒有欄位名的位置 —— 撥號位址的路徑段、第三方套件已經格式化好的訊息、例外文字。
+/// 字面替換這一道不管值從哪條路徑流出去都攔得到,那正是它存在的理由。
+/// <b>The credential is registered as a literal secret the moment it is obtained.</b> As soon as a create or a
+/// renewal yields a listenKey it is registered on <b>this named client's</b> masker with
+/// <see cref="SecretMasker.RegisterKnownSecret"/>. The field-name rule in
+/// <see cref="BinanceConstants.SensitiveParameterNames"/> applies to structured payloads alone and cannot reach
+/// places that have no field name — a path segment of the dialled address, a message some other package has
+/// already formatted, exception text. Literal replacement catches the value whichever route it leaves by, which
+/// is the whole point of having it.
+/// </para>
 /// </remarks>
 internal sealed class BinanceListenKeyClient
 {
     private readonly BinanceApiClient _api;
     private readonly BinanceEndpoints _endpoints;
+    private readonly SecretMasker? _masker;
 
     /// <summary>
     /// 建立憑證管理器。
     /// Creates the credential manager.
     /// </summary>
     /// <param name="api">已組好管線的呼叫器。The caller with the pipeline already assembled.</param>
+    /// <param name="masker">
+    /// 這個具名用戶端的遮罩器,取得的 listenKey 會登記到它上面。傳 <see langword="null"/> 就不登記 ——
+    /// 憑證屆時只剩結構上的保護,任何以字面值流出的路徑都攔不住。
+    /// The named client's masker, onto which every listenKey obtained is registered. With
+    /// <see langword="null"/> nothing is registered and the credential keeps only its structural protection,
+    /// leaving every route that carries it as a literal unguarded.
+    /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="api"/> 為 <see langword="null"/> 時擲出。
     /// Thrown when <paramref name="api"/> is <see langword="null"/>.
     /// </exception>
-    public BinanceListenKeyClient(BinanceApiClient api)
+    public BinanceListenKeyClient(BinanceApiClient api, SecretMasker? masker = null)
     {
         ArgumentNullException.ThrowIfNull(api);
 
         _api = api;
         _endpoints = api.Endpoints;
+        _masker = masker;
     }
 
     /// <summary>
@@ -95,7 +119,24 @@ internal sealed class BinanceListenKeyClient
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return body.TryGetValue(out var json) ? ReadListenKey(json) : body.ToFailure<string>();
+        if (!body.TryGetValue(out var json))
+        {
+            return body.ToFailure<string>();
+        }
+
+        var listenKey = ReadListenKey(json);
+
+        // 登記在「回傳給呼叫端之前」。晚一步就有一整段憑證已經在手上、遮罩器卻還不認得它的空窗,
+        // 而那段空窗正是撥號位址被組出來的地方。
+        // Registered before the value goes back to the caller. A later registration leaves a window in which the
+        // credential is in hand and the masker does not yet know it — and that window is exactly where the
+        // dialled address gets built.
+        if (listenKey.TryGetValue(out var value))
+        {
+            RegisterKnownCredential(value);
+        }
+
+        return listenKey;
     }
 
     /// <summary>
@@ -128,9 +169,19 @@ internal sealed class BinanceListenKeyClient
         // ReadAcknowledgement 只讀 code 與 msg 兩個欄位,不會把本體帶進任何錯誤。
         // A successful body is the credential itself, so only the outcome is inspected. ReadAcknowledgement
         // reads only the code and msg fields and never carries the body into an error.
-        return body.TryGetValue(out var json)
-            ? BinanceResponseReader.ReadAcknowledgement(json, BinanceUserDataPaths.ListenKey, _endpoints)
-            : Result.Failure(body.Error!);
+        if (!body.TryGetValue(out var json))
+        {
+            return Result.Failure(body.Error!);
+        }
+
+        // 續期的回應帶回的<b>可能</b>是另一把憑證(實測 PUT 回的不是文件說的空物件,而是完整的一把)。
+        // 只讀出來登記,不往外傳、也不影響這次續期的成敗。
+        // A renewal <b>may</b> come back with a different credential — measured: the PUT returns a full one
+        // rather than the empty object the documentation describes. It is read only to be registered; it goes
+        // nowhere else and does not affect whether this renewal succeeded.
+        RegisterRenewedCredential(json);
+
+        return BinanceResponseReader.ReadAcknowledgement(json, BinanceUserDataPaths.ListenKey, _endpoints);
     }
 
     /// <summary>
@@ -207,5 +258,89 @@ internal sealed class BinanceListenKeyClient
                     ? Result.Success(key)
                     : BinanceUserDataErrors.ListenKeyMissing(_endpoints);
         }
+    }
+
+    /// <summary>
+    /// 從續期回應裡把憑證讀出來登記,讀不到就算了。
+    /// Registers the credential carried by a renewal response, and does nothing when there is none.
+    /// </summary>
+    /// <param name="json">續期的回應本體。The renewal response body.</param>
+    /// <remarks>
+    /// 這裡刻意不產生任何失敗。續期的成敗由 <see cref="BinanceResponseReader.ReadAcknowledgement"/> 判定,
+    /// 讀不出憑證只代表這次回應沒帶著一把(文件說的空物件就是這個形狀),不是續期失敗 ——
+    /// 把它當失敗會讓一次無害的形狀差異變成「帳戶事件即將消失」的假警報。
+    /// No failure is produced here. Whether the renewal succeeded is <see cref="BinanceResponseReader.ReadAcknowledgement"/>'s
+    /// call, and a body without a credential merely means this response carried none — the empty object the
+    /// documentation describes has exactly that shape. Treating it as a failure would turn a harmless difference
+    /// in shape into a false alarm that account events are about to stop.
+    /// </remarks>
+    private void RegisterRenewedCredential(string json)
+    {
+        if (_masker is null || string.IsNullOrWhiteSpace(json))
+        {
+            return;
+        }
+
+        JsonDocument document;
+
+        try
+        {
+            document = JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            // 連 JsonException.Message 都不轉述:它會引用出錯位置附近的字元,而這裡的本體正常情況下就是憑證。
+            // Not even JsonException.Message is relayed: it quotes characters from around the failure point, and
+            // this body is the credential in the normal case.
+            return;
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && BinanceJson.TryGetString(document.RootElement, BinanceUserDataPaths.ListenKeyField, out var key))
+            {
+                RegisterKnownCredential(key);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 把一把憑證登記成遮罩器的已知祕密。
+    /// Registers one credential as a known secret on the masker.
+    /// </summary>
+    /// <param name="listenKey">剛取得的憑證。The credential just obtained.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>換發之後不移除舊的那一把。</b> <see cref="SecretMasker"/> 只有清空全部的
+    /// <see cref="SecretMasker.ClearKnownSecrets"/>,沒有移除單一項的 API;就算有也不會用它 ——
+    /// 一把已經失效的憑證被多遮一次沒有任何壞處,而少遮一次就是外流。
+    /// 每次續期最多多一筆,帳戶的憑證一小時才換一次,清單不會長到值得擔心。
+    /// <b>The previous key is not removed after a rotation.</b> <see cref="SecretMasker"/> offers only
+    /// <see cref="SecretMasker.ClearKnownSecrets"/>, which clears everything, and no per-value removal; were
+    /// there one it would still go unused, because masking a lapsed credential once more costs nothing while
+    /// masking it once less is a leak. A renewal adds at most one entry and an account rotates its credential
+    /// once an hour, so the list never grows enough to matter.
+    /// </para>
+    /// <para>
+    /// 長度不足的值直接略過,不讓 <see cref="SecretMasker.RegisterKnownSecret"/> 擲出的
+    /// <see cref="ArgumentException"/> 打到啟動路徑上。這不是妥協:短到那個地步的字串,全域字面替換會把大量
+    /// 正常日誌一起遮掉,而遮罩器拒絕它正是為了這件事。真實的 listenKey 有數十個字元,
+    /// 走到這一支代表回應的形狀本來就不對了。
+    /// A value that is too short is skipped rather than letting the <see cref="ArgumentException"/> from
+    /// <see cref="SecretMasker.RegisterKnownSecret"/> reach the start-up path. That is not a compromise: a
+    /// literal that short would mask great swathes of ordinary log text, which is precisely why the masker
+    /// refuses it. A real listenKey is dozens of characters, so reaching this branch already means the response
+    /// had the wrong shape.
+    /// </para>
+    /// </remarks>
+    private void RegisterKnownCredential(string listenKey)
+    {
+        if (_masker is null || listenKey.Length < SecretMasker.MinimumKnownSecretLength)
+        {
+            return;
+        }
+
+        _ = _masker.RegisterKnownSecret(listenKey);
     }
 }

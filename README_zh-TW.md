@@ -450,6 +450,11 @@ dotnet test --filter "TestCategory=MainnetPublic"                          # 主
 - 使用者資料串流的 listenKey 能連上帳戶的私有資料,所以它不會出現在任何錯誤訊息、`Error.Data`、
   例外或串流識別字裡。帶著它的訊息(`listenKeyExpired` 與每一則心跳回覆)一律不轉述,
   心跳回覆一被認出來就直接丟棄,內容連讀都不讀。
+- listenKey **一取得就登記成遮罩器的已知祕密**(建立與續期都是),之後它出現在哪裡都會被換成遮罩字串。
+  這一道與上一道的差別在於作用範圍:欄位名規則只看得到結構化 payload 裡有名字的欄位,
+  而字面替換連沒有名字的位置也攔得到 —— 位址的路徑段、其他套件已經格式化好的訊息、例外文字。
+  走 `AddBinanceUserData` 會自動接上;自行建構時請用接受 `SecretMasker` 的建構式多載,
+  遮罩器以 `provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)` 取得(必須是同一個實例)。
 - 憑證由宿主注入、由 `Ozakboy.Http` 的 `SigningOptions` 承載,本套件只在簽章當下讀取。
 - API 金鑰與密鑰登記在這個用戶端的遮罩器上,REST 用戶端回傳的錯誤 —— 訊息、每一筆 `Error.Data`、例外文字 ——
   都不會帶著它們,即使交易所或傳輸層例外把它們 echo 回來也一樣。

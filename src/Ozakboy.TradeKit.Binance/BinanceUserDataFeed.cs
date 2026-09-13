@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 using Ozakboy.Http;
+using Ozakboy.Security.Masking;
 using Ozakboy.TradeKit.Binance.MarketData;
 using Ozakboy.TradeKit.Binance.UserData;
 using Ozakboy.WebSockets;
@@ -74,6 +75,12 @@ namespace Ozakboy.TradeKit.Binance;
 /// heartbeat replies: on the <c>/private</c> route the answer to <c>LIST_SUBSCRIPTIONS</c> is
 /// <c>{"result":["&lt;listenKey&gt;@ACCOUNT_UPDATE",…],"id":N}</c> — measured on the testnet on 2026-09-12, every
 /// element carrying the credential — and once the reader recognises one it does not so much as look inside.
+/// 0.1.3 起再加一道:憑證一取得就以 <see cref="SecretMasker.RegisterKnownSecret"/> 登記成字面祕密,
+/// 連本套件管不到的路徑 —— 位址的路徑段、其他套件已經格式化好的訊息 —— 流出去的那一份也會被換成遮罩字串。
+/// Since 0.1.3 one more layer sits behind that: the credential is registered as a literal secret with
+/// <see cref="SecretMasker.RegisterKnownSecret"/> as soon as it is obtained, so even a copy leaving by a route
+/// this package does not control — a path segment of an address, a message another package has already
+/// formatted — comes out as the mask segment.
 /// </para>
 /// <para>
 /// <b>撥號位址是 <c>{WebSocketBaseUri}/private/ws?listenKey=…&amp;events=…</c>。</b> 事件清單取自
@@ -151,9 +158,75 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     /// <paramref name="options"/> 或 <paramref name="streamOptions"/> 不合法時擲出。
     /// Thrown when <paramref name="options"/> or <paramref name="streamOptions"/> is invalid.
     /// </exception>
+    /// <remarks>
+    /// <b>這個多載沒有遮罩器,取得的 listenKey 不會被登記成字面祕密。</b> 憑證屆時只剩本套件結構上的保護
+    /// (它不進任何錯誤、診斷資料與串流識別字);任何以字面值流出的路徑 —— 位址的路徑段、
+    /// 其他套件已經格式化好的訊息、例外文字 —— 都攔不住。請改用接受
+    /// <see cref="SecretMasker"/> 的多載,遮罩器以
+    /// <c>provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)</c> 取得;
+    /// 走相依注入(<c>AddBinanceUserData</c>)時會自動帶上,不必自己處理。
+    /// <b>This overload has no masker, so the listenKey it obtains is never registered as a literal secret.</b>
+    /// The credential keeps only this package's structural protection — it reaches no error, no diagnostic data,
+    /// and no stream identifier — while every route that carries it as a literal is left unguarded: a path
+    /// segment of an address, a message another package has already formatted, exception text. Prefer the
+    /// overload taking a <see cref="SecretMasker"/>, obtained with
+    /// <c>provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)</c>; through dependency injection
+    /// (<c>AddBinanceUserData</c>) it is supplied automatically and none of this needs handling by hand.
+    /// </remarks>
     public BinanceUserDataFeed(
         HttpPipelineClient http,
         BinanceOptions options,
+        BinanceUserDataStreamOptions? streamOptions = null,
+        ILoggerFactory? loggerFactory = null,
+        TimeProvider? timeProvider = null,
+        IWebSocketConnectionFactory? connectionFactory = null)
+        : this(http, options, masker: null, streamOptions, loggerFactory, timeProvider, connectionFactory)
+    {
+    }
+
+    /// <summary>
+    /// 建立使用者資料來源,並把取得的串流憑證登記到遮罩器上。
+    /// Creates the user data source and registers the stream credential it obtains with the masker.
+    /// </summary>
+    /// <param name="http">已組好管線的用戶端。The client with the pipeline already assembled.</param>
+    /// <param name="options">連線設定。The connection settings.</param>
+    /// <param name="masker">
+    /// 這個具名用戶端的遮罩器,以
+    /// <c>provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)</c> 取得。
+    /// 必須是<b>同一個</b>實例 —— 另建一個新的遮罩器登記得成功,但真正在遮日誌與錯誤的是用戶端的那一個,
+    /// 兩者不同等於什麼都沒做,而且不會有任何跡象。
+    /// The masker of this named client, obtained with
+    /// <c>provider.GetOzakboyHttpMasker(BinanceConstants.HttpClientName)</c>. It has to be the <b>same</b>
+    /// instance: registering on a freshly built masker succeeds, but the one actually masking logs and errors is
+    /// the client's, and a mismatch achieves nothing while showing no sign of it.
+    /// </param>
+    /// <param name="streamOptions">
+    /// 串流設定,未提供時採用預設值。
+    /// The stream settings; the defaults are used when none is supplied.
+    /// </param>
+    /// <param name="loggerFactory">
+    /// 日誌工廠,轉交給連線層。
+    /// The logger factory, handed to the connection layer.
+    /// </param>
+    /// <param name="timeProvider">時間來源,測試時可替換。The time source, replaceable in tests.</param>
+    /// <param name="connectionFactory">
+    /// WebSocket 連線工廠。未提供時由 <c>Ozakboy.WebSockets</c> 建立真正的連線;
+    /// 單元測試傳入假工廠,整條訂閱流程就能在完全不碰網路的情況下被驗證。
+    /// The WebSocket connection factory. When none is supplied <c>Ozakboy.WebSockets</c> builds a real
+    /// connection; a unit test passes a fake one and exercises the whole path without touching the network.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="http"/> 或 <paramref name="options"/> 為 <see langword="null"/> 時擲出。
+    /// Thrown when <paramref name="http"/> or <paramref name="options"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="options"/> 或 <paramref name="streamOptions"/> 不合法時擲出。
+    /// Thrown when <paramref name="options"/> or <paramref name="streamOptions"/> is invalid.
+    /// </exception>
+    public BinanceUserDataFeed(
+        HttpPipelineClient http,
+        BinanceOptions options,
+        SecretMasker? masker,
         BinanceUserDataStreamOptions? streamOptions = null,
         ILoggerFactory? loggerFactory = null,
         TimeProvider? timeProvider = null,
@@ -172,7 +245,7 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
 
         _api = new BinanceApiClient(http, options, timeProvider);
         _endpoints = _api.Endpoints;
-        _listenKeys = new BinanceListenKeyClient(_api);
+        _listenKeys = new BinanceListenKeyClient(_api, masker);
         _loggerFactory = loggerFactory;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _connectionFactory = connectionFactory;
