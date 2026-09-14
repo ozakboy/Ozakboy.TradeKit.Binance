@@ -166,6 +166,37 @@ public sealed class BinanceTestnetIntegrationTests
         return id;
     }
 
+    /// <summary>
+    /// 查一張剛送出的條件單,查不到就短暫等待後再查,最多約 5 秒。
+    /// Looks up a conditional order just placed, waiting briefly and retrying on a miss, for about 5 s at most.
+    /// </summary>
+    /// <remarks>
+    /// 2026-09-14 Testnet 實測:<c>POST /fapi/v1/algoOrder</c> 成功之後,<c>GET /fapi/v1/algoOrder</c>
+    /// 以 algoId 與 clientAlgoId 查詢都曾連續回 <c>-2013 Order does not exist</c> 約 1.1–1.5 秒,
+    /// 同一時間 <c>openAlgoOrders</c> 已經列出它。文件沒有提到這段落後。這裡的重試只為了讓測試描述
+    /// 「查得回來」這件事本身,不是套件的行為。
+    /// Measured on Testnet on 2026-09-14: after a successful <c>POST /fapi/v1/algoOrder</c>,
+    /// <c>GET /fapi/v1/algoOrder</c> answered <c>-2013 Order does not exist</c> by both algoId and clientAlgoId for
+    /// about 1.1–1.5 s while <c>openAlgoOrders</c> already listed the order. The documentation mentions no such lag.
+    /// The retry here exists only so the test can state "it can be found"; it is not the package's behaviour.
+    /// </remarks>
+    private static async Task<Result<ConditionalOrder>> LookUpOnceVisibleAsync(
+        BinanceFuturesClient client,
+        ConditionalOrderIdentifier identifier)
+    {
+        var found = await client.GetConditionalOrderAsync(Symbol, identifier);
+
+        for (var attempt = 0;
+             attempt < 20 && found.IsFailure && found.Error!.Code == TradeErrorCodes.ConditionalOrderNotFound;
+             attempt++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+            found = await client.GetConditionalOrderAsync(Symbol, identifier);
+        }
+
+        return found;
+    }
+
     // ── 唯讀端點 / Read-only endpoints ───────────────────────────────────────
 
     [TestMethod]
@@ -572,10 +603,23 @@ public sealed class BinanceTestnetIntegrationTests
             Assert.IsNull(order.TriggeredOrderId, "條件單觸發了 —— 觸發價離標記價不夠遠。");
             Assert.IsNull(order.TriggeredAt);
 
-            // 用交易所編號查得回來。
-            // It can be found by exchange id.
-            var byAlgoId = await client.GetConditionalOrderAsync(
-                Symbol,
+            // 未結條件單清單在送單之後立刻看得到它(2026-09-14 實測,與下面的單筆查詢不同)。
+            // The open listing shows it immediately after placement (measured 2026-09-14, unlike the single
+            // lookup below).
+            var openRightAway = await client.GetOpenConditionalOrdersAsync(Symbol);
+
+            Assert.IsTrue(openRightAway.IsSuccess, openRightAway.Error?.Message);
+            Assert.IsTrue(
+                openRightAway.GetValueOrThrow().Any(candidate => candidate.ClientConditionalOrderId == clientAlgoId),
+                "送單成功之後,未結條件單清單裡立刻找不到它。");
+
+            // 用交易所編號查得回來 —— 但要等。2026-09-14 實測:送單成功之後約 0–1.5 秒內,
+            // GET /fapi/v1/algoOrder 對一張確實掛著的條件單回 -2013 Order does not exist。
+            // It can be found by exchange id — after a wait. Measured on 2026-09-14: for roughly 0–1.5 s after a
+            // successful placement, GET /fapi/v1/algoOrder answers -2013 Order does not exist for an order that
+            // really is resting.
+            var byAlgoId = await LookUpOnceVisibleAsync(
+                client,
                 ConditionalOrderIdentifier.FromExchangeId(order.ExchangeConditionalOrderId!));
 
             Assert.IsTrue(byAlgoId.IsSuccess, byAlgoId.Error?.Message);
@@ -585,9 +629,7 @@ public sealed class BinanceTestnetIntegrationTests
 
             // 也用 clientAlgoId 查得回來 —— 這正是送單逾時之後唯一能走的那條路。
             // And by clientAlgoId, which is the only route available after a submission times out.
-            var byClientId = await client.GetConditionalOrderAsync(
-                Symbol,
-                ConditionalOrderIdentifier.FromClientId(clientAlgoId));
+            var byClientId = await LookUpOnceVisibleAsync(client, ConditionalOrderIdentifier.FromClientId(clientAlgoId));
 
             Assert.IsTrue(byClientId.IsSuccess, byClientId.Error?.Message);
             Assert.AreEqual(
@@ -599,9 +641,19 @@ public sealed class BinanceTestnetIntegrationTests
             var open = await client.GetOpenConditionalOrdersAsync(Symbol);
 
             Assert.IsTrue(open.IsSuccess, open.Error?.Message);
-            Assert.IsTrue(
-                open.GetValueOrThrow().Any(candidate => candidate.ClientConditionalOrderId == clientAlgoId),
-                "未結條件單清單裡找不到剛送出去的那張。");
+
+            var listed = open.GetValueOrThrow().SingleOrDefault(candidate => candidate.ClientConditionalOrderId == clientAlgoId);
+
+            Assert.IsNotNull(listed, "未結條件單清單裡找不到剛送出去的那張。");
+
+            // 2026-09-14 實測:這個清單端點把 0.0007 寫成 "7.0E-4"。只比對編號時它照樣綠燈,
+            // 數量卻被讀成 0 —— 所以數量與觸發價要跟送單回應逐一對上。
+            // Measured on 2026-09-14: this listing writes 0.0007 as "7.0E-4". Matching on the id alone stayed
+            // green while the quantity was read as 0, so quantity and trigger price are compared with the
+            // placement response.
+            Assert.AreEqual(quantity, listed.Quantity, "未結清單上的條件單數量與送出的不符。");
+            Assert.AreEqual(triggerPrice, listed.TriggerPrice, "未結清單上的觸發價與送出的不符。");
+            Assert.AreEqual(ConditionalOrderStatus.New, listed.Status);
 
             // 一般掛單清單看不到它 —— 這正是為什麼對帳不能只查那一邊。
             // The ordinary open-orders listing does not see it, which is why reconciliation cannot rely on
@@ -618,6 +670,10 @@ public sealed class BinanceTestnetIntegrationTests
             // 斷言失敗也要撤。留著的條件單比留著的掛單危險:它會在某個價位真的動用部位。
             // Cancelled even when an assertion fails. A stray conditional order is worse than a stray limit
             // order, because it will really move the position at some price.
+            // 2026-09-14 實測:撤單成功之後緊接著的查詢仍回 NEW。這一條曾經因此紅燈,
+            // CancelConditionalOrderAsync 現在會等查詢端點跟上才回傳。
+            // Measured on 2026-09-14: the lookup right after a successful cancellation still answered NEW, which
+            // once turned this red; CancelConditionalOrderAsync now waits for the query endpoint to catch up.
             var cancelled = await client.CancelConditionalOrderAsync(
                 Symbol,
                 ConditionalOrderIdentifier.FromClientId(clientAlgoId));
@@ -632,6 +688,14 @@ public sealed class BinanceTestnetIntegrationTests
         Assert.IsFalse(
             remaining.GetValueOrThrow().Any(candidate => candidate.ClientConditionalOrderId == clientAlgoId),
             "撤完之後那張條件單還在未結清單裡。");
+
+        // 撤掉之後仍查得到,狀態是 CANCELED(已撤且無成交的條件單,建立 3 天內仍可查)。
+        // Still retrievable after cancellation, as CANCELED: an unfilled cancelled order stays queryable for three
+        // days after creation.
+        var afterwards = await client.GetConditionalOrderAsync(Symbol, ConditionalOrderIdentifier.FromClientId(clientAlgoId));
+
+        Assert.IsTrue(afterwards.IsSuccess, afterwards.Error?.Message);
+        Assert.AreEqual(ConditionalOrderStatus.Canceled, afterwards.GetValueOrThrow().Status);
     }
 
     [TestMethod]

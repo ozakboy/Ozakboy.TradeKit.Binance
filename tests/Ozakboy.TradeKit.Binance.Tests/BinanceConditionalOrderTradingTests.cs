@@ -46,6 +46,44 @@ public sealed class BinanceConditionalOrderTradingTests
     private const string AlgoOrderTriggered =
         """{"algoId":2148719,"clientAlgoId":"pt-algo-1","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","timeInForce":"GTC","quantity":"0.002","algoStatus":"TRIGGERED","actualOrderId":"8886900","actualPrice":"36999.50","actualType":"MARKET","triggerPrice":"37000.0","price":"0","selfTradePreventionMode":"EXPIRE_MAKER","workingType":"MARK_PRICE","priceMatch":"NONE","closePosition":false,"priceProtect":false,"reduceOnly":true,"createTime":1789117383000,"updateTime":1789117385000,"triggerTime":1789117385000,"goodTillDate":0}""";
 
+    // ── 2026-09-14 Testnet 實錄 / Recorded on Testnet on 2026-09-14 ─────────────
+    //
+    // 以下三份是實錄,逐字取自同一張 STOP_MARKET(數量 0.0007、觸發價 74457.1、未觸發即撤)的原始回應。
+    // 與上面依文件組的樣本相比,不符之處:POST 的 icebergQuantity 是 JSON null 而不是字串 "null";
+    // GET 多出文件沒提的 tpOrderType;openAlgoOrders 以 actualQty 取代 actualPrice,
+    // 而且數值是浮點數轉字串 —— 數量寫成 "7.0E-4"、價格寫成 "0.0"。
+    // The three below are recordings, verbatim, of one STOP_MARKET (quantity 0.0007, trigger 74457.1, cancelled
+    // untriggered). Against the documentation-built samples above: POST's icebergQuantity is a JSON null rather
+    // than the string "null"; GET adds an undocumented tpOrderType; openAlgoOrders carries actualQty instead of
+    // actualPrice and formats numbers as floating-point strings — a quantity of "7.0E-4" and a price of "0.0".
+
+    /// <summary>實錄:<c>POST /fapi/v1/algoOrder</c> 的回應。Recorded placement response.</summary>
+    private const string MeasuredPlaced =
+        """{"algoId":1000000204743716,"clientAlgoId":"pulsetrade-test-1789363069217-pr","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","timeInForce":"GTC","quantity":"0.0007","algoStatus":"NEW","triggerPrice":"74457.10","price":"0.00","icebergQuantity":null,"selfTradePreventionMode":"EXPIRE_MAKER","workingType":"MARK_PRICE","priceMatch":"NONE","closePosition":false,"priceProtect":false,"reduceOnly":false,"createTime":1789363069186,"updateTime":1789363069186,"triggerTime":0,"goodTillDate":0}""";
+
+    /// <summary>
+    /// 實錄:撤單成功之後緊接著的 <c>GET /fapi/v1/algoOrder</c>,狀態<b>仍是 NEW</b>、<c>updateTime</c> 也沒變。
+    /// Recorded: the <c>GET /fapi/v1/algoOrder</c> right after a successful cancellation, <b>still NEW</b> with
+    /// the old <c>updateTime</c>.
+    /// </summary>
+    private const string MeasuredQueryStillNew =
+        """{"algoId":1000000204743716,"clientAlgoId":"pulsetrade-test-1789363069217-pr","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","timeInForce":"GTC","quantity":"0.0007","algoStatus":"NEW","actualOrderId":"","actualPrice":"0.000000","triggerPrice":"74457.10","price":"0.00","icebergQuantity":null,"tpOrderType":"","selfTradePreventionMode":"EXPIRE_MAKER","workingType":"MARK_PRICE","priceMatch":"NONE","closePosition":false,"priceProtect":false,"reduceOnly":false,"createTime":1789363069186,"updateTime":1789363069186,"triggerTime":0,"goodTillDate":0}""";
+
+    /// <summary>實錄:約 1.2 秒後同一個查詢,狀態才是 CANCELED。Recorded: the same query about 1.2 s later.</summary>
+    private const string MeasuredQueryCanceled =
+        """{"algoId":1000000204743716,"clientAlgoId":"pulsetrade-test-1789363069217-pr","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","timeInForce":"GTC","quantity":"0.0007","algoStatus":"CANCELED","actualOrderId":"","actualPrice":"0.000000","triggerPrice":"74457.10","price":"0.00","icebergQuantity":null,"tpOrderType":"","selfTradePreventionMode":"EXPIRE_MAKER","workingType":"MARK_PRICE","priceMatch":"NONE","closePosition":false,"priceProtect":false,"reduceOnly":false,"createTime":1789363069186,"updateTime":1789363071983,"triggerTime":0,"goodTillDate":0}""";
+
+    /// <summary>實錄:<c>GET /fapi/v1/openAlgoOrders</c>。數量是 <c>"7.0E-4"</c>。Recorded open listing.</summary>
+    private const string MeasuredOpenAlgoOrders =
+        """[{"algoId":1000000204743716,"clientAlgoId":"pulsetrade-test-1789363069217-pr","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","timeInForce":"GTC","quantity":"7.0E-4","algoStatus":"NEW","actualOrderId":"","actualQty":"0.0","triggerPrice":"74457.1","price":"0.0","icebergQuantity":null,"selfTradePreventionMode":"EXPIRE_MAKER","workingType":"MARK_PRICE","priceMatch":"NONE","closePosition":false,"priceProtect":false,"reduceOnly":false,"createTime":1789363069186,"updateTime":1789363069186,"triggerTime":0,"goodTillDate":0}]""";
+
+    /// <summary>實錄:<c>DELETE /fapi/v1/algoOrder</c> 的回應。Recorded cancel acknowledgement.</summary>
+    private const string MeasuredCancelAck =
+        """{"algoId":1000000204743716,"clientAlgoId":"pulsetrade-test-1789363069217-pr","code":"200","msg":"success"}""";
+
+    /// <summary>實錄:查不到條件單(撤單剛成功時的回查也曾回這個)。Recorded: conditional order not found.</summary>
+    private const string MeasuredNotFound = """{"code":-2013,"msg":"Order does not exist."}""";
+
     private static (BinanceFuturesClient Client, StubHttpMessageHandler Stub, HttpClient Http) Create(
         StubHttpMessageHandler? stub = null,
         RetryPolicy? retryPolicy = null)
@@ -407,6 +445,156 @@ public sealed class BinanceConditionalOrderTradingTests
         }
     }
 
+    /// <summary>
+    /// 撤單固定回實錄的成功回應,回查依序回給定的內容(用完就重複最後一個)。
+    /// Answers the cancellation with the recorded acknowledgement and the read-backs with the given replies in
+    /// order, repeating the last one once they run out.
+    /// </summary>
+    private static StubHttpMessageHandler LaggingReadBackStub(params (HttpStatusCode Status, string Body)[] readBacks)
+    {
+        var reads = 0;
+
+        return new((request, _) =>
+        {
+            var (status, body) = request.Method == HttpMethod.Delete
+                ? (HttpStatusCode.OK, MeasuredCancelAck)
+                : readBacks[Math.Min(Interlocked.Increment(ref reads) - 1, readBacks.Length - 1)];
+
+            return new HttpResponseMessage(status)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+            };
+        });
+    }
+
+    private static int ReadBackCount(StubHttpMessageHandler stub) =>
+        stub.Requests.Count(snapshot =>
+            snapshot.Method == HttpMethod.Get
+            && snapshot.RequestUri!.AbsolutePath.Contains("/fapi/v1/algoOrder", StringComparison.Ordinal));
+
+    [TestMethod]
+    public async Task CancellingWaitsForTheQueryEndpointToCatchUpRatherThanReportingNew()
+    {
+        // 2026-09-14 Testnet 實測:撤單回 "200" 之後,緊接著的回查仍是 NEW,一秒多後才是 CANCELED。
+        // 把第一個回查結果照抄回去,撤單成功卻回報「還掛著」—— 整合測試就是這樣紅的。
+        // Measured on Testnet on 2026-09-14: after the cancellation answered "200", the immediate read-back was
+        // still NEW and only showed CANCELED over a second later. Echoing the first read-back reports a successful
+        // cancellation as "still resting", which is exactly how the integration test went red.
+        var (client, stub, http) = Create(LaggingReadBackStub(
+            (HttpStatusCode.OK, MeasuredQueryStillNew),
+            (HttpStatusCode.OK, MeasuredQueryStillNew),
+            (HttpStatusCode.OK, MeasuredQueryCanceled)));
+
+        using (http)
+        using (client)
+        {
+            client.CancelReadBackDelays = [TimeSpan.FromMilliseconds(1), TimeSpan.FromMilliseconds(1), TimeSpan.FromMilliseconds(1)];
+
+            var cancelled = await client.CancelConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromClientId("pulsetrade-test-1789363069217-pr"));
+
+            Assert.IsTrue(cancelled.TryGetValue(out var order), cancelled.Error?.Message);
+            Assert.AreEqual(ConditionalOrderStatus.Canceled, order.Status);
+            Assert.AreEqual("1000000204743716", order.ExchangeConditionalOrderId);
+            Assert.AreEqual(3, ReadBackCount(stub));
+        }
+    }
+
+    [TestMethod]
+    public async Task CancellingReadsAgainThroughATransientNotFound()
+    {
+        // 另一次實測:撤單成功之後緊接著的回查回 -2013。那不是撤單失敗,是查詢端點還沒同步。
+        // Another measured run: the read-back right after a successful cancellation answered -2013. That is not
+        // a failed cancellation but a query endpoint that has not caught up.
+        var (client, stub, http) = Create(LaggingReadBackStub(
+            (HttpStatusCode.BadRequest, MeasuredNotFound),
+            (HttpStatusCode.OK, MeasuredQueryCanceled)));
+
+        using (http)
+        using (client)
+        {
+            client.CancelReadBackDelays = [TimeSpan.FromMilliseconds(1), TimeSpan.FromMilliseconds(1)];
+
+            var cancelled = await client.CancelConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromExchangeId("1000000204743716"));
+
+            Assert.IsTrue(cancelled.TryGetValue(out var order), cancelled.Error?.Message);
+            Assert.AreEqual(ConditionalOrderStatus.Canceled, order.Status);
+            Assert.AreEqual(2, ReadBackCount(stub));
+        }
+    }
+
+    [TestMethod]
+    public async Task ACancellationTheQueryNeverCatchesUpWithFailsTransientlyAndSaysItWentThrough()
+    {
+        // 等完預算仍是 NEW:不照抄(那會說停損還掛著)、也不改寫成 Canceled(那是替交易所說話),
+        // 而是回報暫時性失敗,並講明撤單本身已經成功。
+        // Still NEW after the whole budget: neither echoed (that says the stop still rests) nor rewritten as
+        // Canceled (that speaks for the exchange), but a transient failure stating the cancellation went through.
+        var (client, stub, http) = Create(LaggingReadBackStub((HttpStatusCode.OK, MeasuredQueryStillNew)));
+
+        using (http)
+        using (client)
+        {
+            client.CancelReadBackDelays = [TimeSpan.FromMilliseconds(1), TimeSpan.FromMilliseconds(1)];
+
+            var cancelled = await client.CancelConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromExchangeId("1000000204743716"));
+
+            Assert.IsTrue(cancelled.IsFailure);
+            Assert.AreEqual(TradeErrorCodes.ExchangeUnavailable, cancelled.Error!.Code);
+            Assert.IsTrue(cancelled.Error.IsTransient);
+            Assert.Contains("撤單本身已經成功", cancelled.Error.Message);
+
+            // 第一次立刻查,之後每個間隔各查一次,不多也不少。
+            // One immediate read-back and one per delay, no more and no fewer.
+            Assert.AreEqual(3, ReadBackCount(stub));
+        }
+    }
+
+    [TestMethod]
+    public async Task ACancellationThatStaysNotFoundKeepsTheConditionalCodeAndSaysItWentThrough()
+    {
+        var (client, stub, http) = Create(LaggingReadBackStub((HttpStatusCode.BadRequest, MeasuredNotFound)));
+
+        using (http)
+        using (client)
+        {
+            client.CancelReadBackDelays = [TimeSpan.FromMilliseconds(1)];
+
+            var cancelled = await client.CancelConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromExchangeId("1000000204743716"));
+
+            Assert.IsTrue(cancelled.IsFailure);
+            Assert.AreEqual(TradeErrorCodes.ConditionalOrderNotFound, cancelled.Error!.Code);
+            Assert.Contains("撤單本身已經成功", cancelled.Error.Message);
+            Assert.AreEqual(2, ReadBackCount(stub));
+        }
+    }
+
+    [TestMethod]
+    public async Task AReadBackThatIsAlreadyFinalIsNotRepeated()
+    {
+        // 交易所已經同步的正常情況,不該為了保險多查幾次去吃權重。
+        // When the exchange has already caught up, nothing is re-read just in case.
+        var (client, stub, http) = Create(LaggingReadBackStub((HttpStatusCode.OK, MeasuredQueryCanceled)));
+
+        using (http)
+        using (client)
+        {
+            var cancelled = await client.CancelConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromExchangeId("1000000204743716"));
+
+            Assert.IsTrue(cancelled.IsSuccess, cancelled.Error?.Message);
+            Assert.AreEqual(1, ReadBackCount(stub));
+        }
+    }
+
     [TestMethod]
     public async Task CancellingAllUsesTheDedicatedAlgoEndpointRatherThanTheOrdinaryOne()
     {
@@ -455,6 +643,100 @@ public sealed class BinanceConditionalOrderTradingTests
             // an order this package never placed.
             Assert.AreEqual("CONDITIONAL", sent.Parameter("algoType"));
             Assert.AreEqual("BTCUSDT", sent.Parameter("symbol"));
+        }
+    }
+
+    [TestMethod]
+    public async Task TheOpenListingReadsAQuantityWrittenInExponentNotation()
+    {
+        // 2026-09-14 Testnet 實測:openAlgoOrders 把 0.0007 寫成 "7.0E-4"。以固定小數的讀法解析會失敗,
+        // 數量落回 0 —— 未結清單上的停損看起來什麼都沒保護,而清單本身照樣「成功」。
+        // Measured on Testnet on 2026-09-14: openAlgoOrders writes 0.0007 as "7.0E-4". Parsed as fixed-point it
+        // fails and the quantity falls back to 0 — the stop on the listing appears to protect nothing while the
+        // listing itself still "succeeds".
+        var stub = new StubHttpMessageHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(MeasuredOpenAlgoOrders, System.Text.Encoding.UTF8, "application/json"),
+        });
+
+        var (client, _, http) = Create(stub);
+
+        using (http)
+        using (client)
+        {
+            var open = await client.GetOpenConditionalOrdersAsync("BTCUSDT");
+
+            Assert.IsTrue(open.TryGetValue(out var orders), open.Error?.Message);
+            Assert.HasCount(1, orders);
+
+            var order = orders[0];
+
+            Assert.AreEqual(0.0007m, order.Quantity);
+            Assert.AreEqual(74_457.1m, order.TriggerPrice);
+
+            // "0.0" 一樣代表沒有限價。"0.0" likewise means no limit price.
+            Assert.IsNull(order.Price);
+            Assert.IsNull(order.TriggeredOrderId);
+            Assert.IsNull(order.TriggeredAt);
+            Assert.AreEqual(ConditionalOrderStatus.New, order.Status);
+            Assert.AreEqual(TriggerPriceType.MarkPrice, order.TriggerPriceType);
+        }
+    }
+
+    [TestMethod]
+    [DataRow("7.0E-4", "0.0007")]
+    [DataRow("1.0E7", "10000000")]
+    [DataRow("1.2345E-5", "0.000012345")]
+    [DataRow("0.0", "0")]
+    public void TheAlgoReaderParsesExponentNotationExactly(string written, string expected)
+    {
+        // Java Double.toString 在小於 10⁻³ 或大於等於 10⁷ 時改用科學記號,兩端都要接得住,而且是精確的十進位值。
+        // Java's Double.toString switches to exponents below 10⁻³ and at or above 10⁷; both ends must parse, and
+        // into the exact decimal value.
+        using var document = System.Text.Json.JsonDocument.Parse($$"""{"quantity":"{{written}}"}""");
+
+        Assert.IsTrue(BinanceJson.TryGetDecimalAllowingExponent(document.RootElement, "quantity", out var value));
+        Assert.AreEqual(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), value);
+
+        // 一般讀法維持拒絕,例外只開在 Algo Service 這一條。
+        // The ordinary reader keeps refusing; the exception is confined to the Algo Service path.
+        if (written.Contains('E', StringComparison.Ordinal))
+        {
+            Assert.IsFalse(BinanceJson.TryGetDecimal(document.RootElement, "quantity", out _));
+        }
+    }
+
+    [TestMethod]
+    public async Task TheRecordedPlacementAndQueryShapesParse()
+    {
+        // 實錄的 POST 沒有 actualOrderId、icebergQuantity 是 JSON null;GET 多了 tpOrderType 與 actualPrice。
+        // The recorded POST lacks actualOrderId and has a JSON null icebergQuantity; GET adds tpOrderType and
+        // actualPrice.
+        var (client, _, http) = Create(AlgoStub(placeBody: MeasuredPlaced, queryBody: MeasuredQueryStillNew));
+
+        using (http)
+        using (client)
+        {
+            var placed = await client.PlaceConditionalOrderAsync(StopMarket());
+
+            Assert.IsTrue(placed.TryGetValue(out var order), placed.Error?.Message);
+            Assert.AreEqual("1000000204743716", order.ExchangeConditionalOrderId);
+            Assert.AreEqual(0.0007m, order.Quantity);
+            Assert.AreEqual(74_457.1m, order.TriggerPrice);
+            Assert.IsNull(order.Price);
+            Assert.IsNull(order.TriggeredOrderId);
+            Assert.IsNull(order.TriggeredAt);
+            Assert.IsFalse(order.ReduceOnly);
+
+            var found = await client.GetConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromExchangeId("1000000204743716"));
+
+            Assert.IsTrue(found.TryGetValue(out var queried), found.Error?.Message);
+            Assert.AreEqual(ConditionalOrderStatus.New, queried.Status);
+            Assert.IsNull(queried.TriggeredOrderId, "actualOrderId 的空字串代表還沒有實際委託。");
+            Assert.AreEqual(order.Quantity, queried.Quantity);
+            Assert.AreEqual(order.TriggerPrice, queried.TriggerPrice);
         }
     }
 

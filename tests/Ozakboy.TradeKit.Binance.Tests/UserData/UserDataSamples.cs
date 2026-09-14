@@ -70,6 +70,31 @@ internal static class UserDataSamples
         """{"e":"ALGO_UPDATE","T":1789117383000,"E":1789117383005,"o":{"caid":"pulsetrade-algo-1","aid":2148719,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.002","X":"NEW","ai":"","ap":"0.00000","aq":"0.00000","act":"0","tp":"37000.0","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":true,"tt":0,"gtd":0,"rm":"","ia":false}}""";
 
     /// <summary>
+    /// 實錄(2026-09-14 Testnet):條件單掛上去的 <c>ALGO_UPDATE</c>,逐字取自 <c>/private/ws</c> 串流。
+    /// Recorded on Testnet on 2026-09-14: the <c>ALGO_UPDATE</c> for a newly placed conditional order, verbatim
+    /// from the <c>/private/ws</c> stream.
+    /// </summary>
+    /// <remarks>
+    /// 與上面依文件組的 <see cref="AlgoNew"/> 不符之處:<b>沒有</b> <c>ap</c>、<c>aq</c>、<c>act</c>、<c>rm</c>
+    /// 四個欄位(不是空字串,是整個不在);<c>tp</c> 是 <c>"74457.1"</c> 而 <c>POST</c> 回應寫
+    /// <c>"74457.10"</c>;<c>p</c> 是 <c>"0"</c>。
+    /// Against the documentation-built <see cref="AlgoNew"/>: <c>ap</c>, <c>aq</c>, <c>act</c> and <c>rm</c> are
+    /// <b>absent</b> rather than empty; <c>tp</c> reads <c>"74457.1"</c> where the <c>POST</c> response wrote
+    /// <c>"74457.10"</c>; <c>p</c> is <c>"0"</c>.
+    /// </remarks>
+    public const string AlgoNewMeasured =
+        """{"e":"ALGO_UPDATE","T":1789363069186,"E":1789363069193,"o":{"caid":"pulsetrade-test-1789363069217-pr","aid":1000000204743716,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.0007","X":"NEW","ai":"","tp":"74457.1","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":false,"tt":0,"gtd":0,"ia":false}}""";
+
+    /// <summary>
+    /// 實錄(2026-09-14 Testnet):同一張條件單被撤掉的 <c>ALGO_UPDATE</c>。它的 <c>T</c> 比
+    /// <c>DELETE</c> 的回應還早,而緊接著的 REST 查詢仍回 NEW。
+    /// Recorded on Testnet on 2026-09-14: the <c>ALGO_UPDATE</c> for the same order being cancelled. Its <c>T</c>
+    /// precedes the <c>DELETE</c> response, while an immediate REST lookup still answered NEW.
+    /// </summary>
+    public const string AlgoCanceledMeasured =
+        """{"e":"ALGO_UPDATE","T":1789363071983,"E":1789363071983,"o":{"caid":"pulsetrade-test-1789363069217-pr","aid":1000000204743716,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.0007","X":"CANCELED","ai":"","tp":"74457.1","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":false,"tt":0,"gtd":0,"ia":false}}""";
+
+    /// <summary>
     /// 同一張條件單被撤掉。The same conditional order, cancelled.
     /// </summary>
     public const string AlgoCanceled =

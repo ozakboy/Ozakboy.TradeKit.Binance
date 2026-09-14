@@ -282,6 +282,23 @@ public static class BinanceResponseReader
     /// <c>actualOrderId</c>, since nothing has triggered yet and there is no real order, while <c>GET</c>
     /// carries it and in turn omits <c>activatePrice</c> and <c>callbackRate</c>. One reader serves both by
     /// treating all of those as optional: a missing field here is normal rather than a parse failure.
+    /// <para>
+    /// 2026-09-14 Testnet 實測的三種形狀(<c>STOP_MARKET</c>),與官方文件範例不符之處:
+    /// <c>POST</c> 沒有 <c>actualOrderId</c> / <c>actualPrice</c>,<c>icebergQuantity</c> 是 JSON 的
+    /// <c>null</c> 而不是文件寫的字串 <c>"null"</c>;<c>GET</c> 多出 <c>actualOrderId:""</c>、
+    /// <c>actualPrice:"0.000000"</c> 與文件沒提的 <c>tpOrderType:""</c>;<c>openAlgoOrders</c> 用
+    /// <c>actualQty</c> 取代 <c>actualPrice</c>,而且數值是浮點數轉字串(<c>"7.0E-4"</c>、<c>"0.0"</c>),
+    /// 見 <see cref="BinanceJson.TryGetDecimalAllowingExponent"/>。三者都沒有 <c>activatePrice</c> 與
+    /// <c>callbackRate</c>。
+    /// The three shapes measured on Testnet on 2026-09-14 (<c>STOP_MARKET</c>) and where they differ from the
+    /// documentation examples: <c>POST</c> has no <c>actualOrderId</c> / <c>actualPrice</c>, and its
+    /// <c>icebergQuantity</c> is a JSON <c>null</c> rather than the documented string <c>"null"</c>; <c>GET</c>
+    /// adds <c>actualOrderId:""</c>, <c>actualPrice:"0.000000"</c>, and an undocumented <c>tpOrderType:""</c>;
+    /// <c>openAlgoOrders</c> carries <c>actualQty</c> instead of <c>actualPrice</c> and formats numbers as
+    /// floating-point strings (<c>"7.0E-4"</c>, <c>"0.0"</c>) — see
+    /// <see cref="BinanceJson.TryGetDecimalAllowingExponent"/>. None of the three carries <c>activatePrice</c> or
+    /// <c>callbackRate</c>.
+    /// </para>
     /// </remarks>
     public static Result<ConditionalOrder> ReadConditionalOrder(string json, DateTimeOffset asOf)
     {
@@ -795,18 +812,23 @@ public static class BinanceResponseReader
                 BinanceJson.TryGetString(element, "positionSide", out var positionSide) ? positionSide : null),
             TimeInForce = BinanceOrderMapper.ParseTimeInForce(
                 BinanceJson.TryGetString(element, "timeInForce", out var timeInForce) ? timeInForce : null),
-            Quantity = BinanceJson.TryGetDecimal(element, "quantity", out var quantity) ? quantity : 0m,
+            // 2026-09-14 Testnet 實測:openAlgoOrders 把 0.0007 寫成 "7.0E-4",所以這一組數值欄位
+            // 一律用容許科學記號的讀法。用一般讀法,數量會解析失敗而落回 0。
+            // Measured on Testnet on 2026-09-14: openAlgoOrders writes 0.0007 as "7.0E-4", so every numeric
+            // field here is read allowing exponents. The ordinary reader fails the parse and falls back to 0.
+            Quantity = BinanceJson.TryGetDecimalAllowingExponent(element, "quantity", out var quantity) ? quantity : 0m,
 
-            // 幣安對「沒有這個價格」的表示是 0 或空字串,不是省略欄位;市價型條件單的 price 就是 "0"。
-            // 照抄下去會讓上層看到一張「限價零元」的停損。
+            // 幣安對「沒有這個價格」的表示是 0 或空字串,不是省略欄位;市價型條件單的 price 就是 "0"
+            // (openAlgoOrders 上則是 "0.0")。照抄下去會讓上層看到一張「限價零元」的停損。
             // Binance writes "no such price" as 0 or an empty string rather than omitting the field: a
-            // market-style conditional order's price is "0". Copying that through shows a stop priced at zero.
-            TriggerPrice = ReadOptionalPrice(element, "triggerPrice"),
+            // market-style conditional order's price is "0" ("0.0" on openAlgoOrders). Copying that through shows
+            // a stop priced at zero.
+            TriggerPrice = ReadOptionalAlgoDecimal(element, "triggerPrice"),
             TriggerPriceType = ParseWorkingType(
                 BinanceJson.TryGetString(element, "workingType", out var workingType) ? workingType : null),
-            Price = ReadOptionalPrice(element, "price"),
-            CallbackRate = ReadOptionalPrice(element, "callbackRate"),
-            ActivationPrice = ReadOptionalPrice(element, "activatePrice"),
+            Price = ReadOptionalAlgoDecimal(element, "price"),
+            CallbackRate = ReadOptionalAlgoDecimal(element, "callbackRate"),
+            ActivationPrice = ReadOptionalAlgoDecimal(element, "activatePrice"),
             ReduceOnly = BinanceJson.TryGetBoolean(element, "reduceOnly", out var reduceOnly) && reduceOnly,
             ClosePosition = BinanceJson.TryGetBoolean(element, "closePosition", out var closePosition)
                 && closePosition,
@@ -873,6 +895,9 @@ public static class BinanceResponseReader
 
     private static decimal? ReadOptionalPrice(JsonElement element, string propertyName) =>
         BinanceJson.TryGetDecimal(element, propertyName, out var value) && value > 0m ? value : null;
+
+    private static decimal? ReadOptionalAlgoDecimal(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetDecimalAllowingExponent(element, propertyName, out var value) && value > 0m ? value : null;
 
     private static Result<Balance> ReadBalance(JsonElement element)
     {

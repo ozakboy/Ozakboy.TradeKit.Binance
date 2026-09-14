@@ -117,11 +117,12 @@ supplies the missing path.
   不是每個商品各 200 張(幣安於 2025-12-29 移除 `exchangeInfo` 的 `MAX_NUM_ALGO_ORDERS` per-symbol 篩選器)。
   The note on `-2025` now records that a conditional order's ceiling is **200 across the whole account** rather
   than per symbol, after Binance removed the per-symbol `MAX_NUM_ALGO_ORDERS` filter on 2025-12-29.
-- **撤銷單張條件單會打兩次網路**:`DELETE` 的回應只有 `{algoId, clientAlgoId, code, msg}`,
-  沒有方向、沒有類型、沒有觸發價,湊不出一個誠實的 `ConditionalOrder`;因此撤完再查一次。
-  多一次權重 1 的查詢,換的是不必在回傳值裡填 `Unspecified`。
-  **Cancelling one conditional order makes two calls**: the `DELETE` response carries no side, type, or trigger
-  price, so the order is read back afterwards. One extra request of weight 1 buys not returning `Unspecified`.
+- **撤銷單張條件單至少打兩次網路**:`DELETE` 的回應只有 `{algoId, clientAlgoId, code, msg}`,
+  沒有方向、沒有類型、沒有觸發價,湊不出一個誠實的 `ConditionalOrder`;因此撤完再查(查詢端點落後時會多查幾次,
+  見「問題修正」)。多一次權重 1 的查詢,換的是不必在回傳值裡填 `Unspecified`。
+  **Cancelling one conditional order makes at least two calls**: the `DELETE` response carries no side, type, or
+  trigger price, so the order is read back afterwards (more than once when the query endpoint lags; see Fixed).
+  One extra request of weight 1 buys not returning `Unspecified`.
 - 幾個必須逐字照抄、抄錯不會報錯只會靜默出事的地方,都有測試釘住:
   參數名是 `triggerPrice` 而不是 `stopPrice`、是 `activatePrice`(動詞)而不是 `activationPrice`;
   `algoStatus` 的拼字是 `CANCELED`(一個 L),而且沒有 `WORKING` 與 `FILLED`;
@@ -133,6 +134,49 @@ supplies the missing path.
   `PlaceConditionalOrderAsync` 的說明。**未觸發的條件單不支援改單**,調整觸發價只能撤掉重下。
   The limit is **200 conditional orders across the whole account**, not per symbol, and an untriggered
   conditional order **cannot be modified**; changing a trigger price means cancel and replace.
+
+### 問題修正 / Fixed
+
+以下三項都是 2026-09-14 在 Testnet 實際跑過才發現、文件上看不出來的形狀。
+All three below are shapes found by running against Testnet on 2026-09-14 that the documentation does not show.
+
+- **撤單之後的回查會等查詢端點跟上**:`DELETE /fapi/v1/algoOrder` 回成功之後,緊接著的
+  `GET /fapi/v1/algoOrder` 實測仍回 `NEW`(`updateTime` 也是舊的),或暫時回 `-2013`;
+  零點幾秒到一秒多之後才是 `CANCELED`。先前把第一次回查照抄回去,撤單成功卻回報「還掛著」或「查不到」。
+  現在回查結果還不是終態或查不到時,依 250/500/1000/2000 毫秒再查(合計約 3.75 秒);等完仍是未結狀態,
+  回 `trade.exchange_unavailable`(暫時性)並講明撤單本身已經成功。
+  **The read-back after a cancellation waits for the query endpoint.** Right after `DELETE /fapi/v1/algoOrder`
+  succeeded, `GET /fapi/v1/algoOrder` was measured still answering `NEW` (with the old `updateTime`) or a
+  transient `-2013`, reaching `CANCELED` a fraction of a second to over a second later. Echoing the first
+  read-back reported a successful cancellation as "still resting" or "not found". A read-back that is not final
+  or finds nothing is now repeated after 250/500/1000/2000 ms (about 3.75 s); still open at the end, the result
+  is `trade.exchange_unavailable` (transient) with a message saying the cancellation itself succeeded.
+- **`openAlgoOrders` 的數量以科學記號回傳**:實測 0.0007 寫成 `"7.0E-4"`、價格寫成 `"74457.1"` / `"0.0"`
+  (同一張單在 `POST` / `GET algoOrder` 與 `ALGO_UPDATE` 上都是固定小數),是 Java `Double.toString` 的輸出,
+  小於 10⁻³ 或大於等於 10⁷ 都會中。先前以固定小數解析失敗、數量落回 0 —— 未結清單上的停損數量是 0,
+  清單本身卻回報成功。條件單回應的數值欄位現在接受科學記號(以 `decimal` 精確解析),其他端點維持拒絕。
+  **`openAlgoOrders` returns quantities in exponent notation.** 0.0007 was measured as `"7.0E-4"`, prices as
+  `"74457.1"` / `"0.0"` (the same order is fixed-point on `POST` / `GET algoOrder` and on `ALGO_UPDATE`) — Java's
+  `Double.toString`, which affects anything below 10⁻³ or at or above 10⁷. The fixed-point parse failed and the
+  quantity fell back to 0 while the listing still succeeded. Numeric fields on conditional order responses now
+  accept exponents, parsed exactly into `decimal`; every other endpoint still refuses them.
+- **剛送出的條件單,`GetConditionalOrderAsync` 會暫時查不到**:實測送單成功後約 1.1–1.5 秒內,以 algoId 或
+  clientAlgoId 查詢都回 `-2013`,而 `openAlgoOrders` 當下就列得出來。行為沒有改(查不到仍回
+  `trade.conditional_order_not_found`),但方法說明已寫明:送單逾時之後**緊接著**查不到,不能當成「沒送進去、
+  可以重送」;先查 `GetOpenConditionalOrdersAsync`,或隔幾秒再確認。
+  **A conditional order just placed is briefly not found by `GetConditionalOrderAsync`.** For about 1.1–1.5 s
+  after a successful placement, lookups by algoId and by clientAlgoId were measured answering `-2013` while
+  `openAlgoOrders` already listed the order. Behaviour is unchanged, but the method now documents that a miss
+  **immediately** after a timed-out placement must not be read as "it never landed, resend"; check
+  `GetOpenConditionalOrdersAsync` first, or confirm a few seconds later.
+
+另有兩處實測形狀與文件範例不同、但不影響解析,已用實錄樣本加測試釘住:`POST algoOrder` 的
+`icebergQuantity` 是 JSON `null` 而不是字串 `"null"`、`GET algoOrder` 多出 `tpOrderType`;
+`ALGO_UPDATE` 在未觸發的 NEW / CANCELED 事件上**完全沒有** `ap`、`aq`、`act`、`rm` 四個欄位。
+Two further shapes differ from the documentation examples without affecting the parse and are pinned by
+recorded samples: `POST algoOrder` has a JSON `null` `icebergQuantity` rather than the string `"null"` and
+`GET algoOrder` adds `tpOrderType`; `ALGO_UPDATE` omits `ap`, `aq`, `act` and `rm` **entirely** on untriggered
+NEW / CANCELED events.
 
 規格出處:幣安官方 USDⓈ-M Futures 文件的 Trade REST API、User Data Streams、Error Code 與 Change Log
 四頁,擷取日期 2026-09-14。

@@ -178,6 +178,49 @@ public sealed class BinanceAlgoUpdateReaderTests
     }
 
     [TestMethod]
+    public void TheRecordedNewEventWithoutTheActualFieldsParses()
+    {
+        // 2026-09-14 Testnet 實錄:ap、aq、act、rm 四個欄位整個不在。它們若被當成必填,
+        // 串流上每一則條件單事件都會解析失敗,而 REST 查詢一切正常。
+        // Recorded on Testnet on 2026-09-14: ap, aq, act and rm are absent altogether. Treating any of them as
+        // required would fail every conditional order event on the stream while REST looked perfectly healthy.
+        var read = BinanceUserDataReader.Read(UserDataSamples.AlgoNewMeasured);
+
+        Assert.IsTrue(read.TryGetValue(out var evt), read.Error?.Message);
+
+        var update = evt.ConditionalOrderUpdate!;
+        var order = update.ConditionalOrder;
+
+        Assert.AreEqual("pulsetrade-test-1789363069217-pr", order.ClientConditionalOrderId);
+        Assert.AreEqual("1000000204743716", order.ExchangeConditionalOrderId);
+        Assert.AreEqual(ConditionalOrderType.StopMarket, order.ConditionalOrderType);
+        Assert.AreEqual(ConditionalOrderStatus.New, order.Status);
+        Assert.AreEqual(OrderSide.Sell, order.Side);
+        Assert.AreEqual(0.0007m, order.Quantity);
+        Assert.AreEqual(74_457.1m, order.TriggerPrice);
+        Assert.IsNull(order.Price);
+        Assert.AreEqual(TriggerPriceType.MarkPrice, order.TriggerPriceType);
+        Assert.IsFalse(order.ReduceOnly);
+        Assert.IsNull(order.TriggeredOrderId);
+        Assert.IsNull(order.TriggeredAt);
+        Assert.IsNull(update.RejectReason, "rm 不在,等同沒有拒絕原因。");
+        Assert.AreEqual("NEW", update.RawStatus);
+    }
+
+    [TestMethod]
+    public void TheRecordedCancelEventReachesATerminalState()
+    {
+        var update = BinanceUserDataReader.Read(UserDataSamples.AlgoCanceledMeasured)
+            .GetValueOrThrow()
+            .ConditionalOrderUpdate!;
+
+        Assert.AreEqual(ConditionalOrderStatus.Canceled, update.ConditionalOrder.Status);
+        Assert.AreEqual("CANCELED", update.RawStatus);
+        Assert.IsTrue(update.ConditionalOrder.IsFinal);
+        Assert.AreEqual(DateTimeOffset.FromUnixTimeMilliseconds(1789363071983), update.Timestamp);
+    }
+
+    [TestMethod]
     public void AFrameWithoutTheAlgoObjectFails()
     {
         var read = BinanceUserDataReader.Read("""{"e":"ALGO_UPDATE","T":1789117383000,"E":1789117383005}""");

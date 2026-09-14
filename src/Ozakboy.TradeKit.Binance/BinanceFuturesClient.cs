@@ -66,9 +66,37 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
     /// </remarks>
     private const string AlgoTypeParameterName = "algoType";
 
+    /// <summary>
+    /// 撤銷條件單之後回查的等待間隔:第一次回查立刻發出,之後每次失敗前各等這麼久。
+    /// The waits between read-backs after cancelling a conditional order: the first read-back goes out at once,
+    /// and each of these precedes one more attempt.
+    /// </summary>
+    /// <remarks>
+    /// 2026-09-14 Testnet 實測,<c>DELETE /fapi/v1/algoOrder</c> 回 <c>code "200"</c> 之後,
+    /// 緊接著(回應後 50 與 100 毫秒)的兩次 <c>GET /fapi/v1/algoOrder</c> 仍然回 <c>algoStatus:"NEW"</c>
+    /// (<c>updateTime</c> 也還是舊的),約 1.2 秒後才變成 <c>CANCELED</c>;另一次實測則是緊接著的回查回
+    /// <c>-2013 Order does not exist</c>。
+    /// 而 <c>ALGO_UPDATE</c> 的 CANCELED 事件比 <c>DELETE</c> 的回應還早到。文件沒有提到查詢端點有這段落後。
+    /// 總計約 3.75 秒;權重每次 1。
+    /// Measured on Testnet on 2026-09-14: after <c>DELETE /fapi/v1/algoOrder</c> answered <c>code "200"</c>,
+    /// two immediate <c>GET /fapi/v1/algoOrder</c> calls (50 and 100 ms after the response) still returned
+    /// <c>algoStatus:"NEW"</c> with the old <c>updateTime</c>, and <c>CANCELED</c> showed only about 1.2 s later;
+    /// in another run the immediate read-back got <c>-2013 Order does not exist</c> instead. The <c>ALGO_UPDATE</c> CANCELED event arrived before the
+    /// <c>DELETE</c> response did. The documentation mentions no such lag on the query endpoint. About 3.75 s in
+    /// total, at a weight of 1 per attempt.
+    /// </remarks>
+    private static readonly TimeSpan[] DefaultCancelReadBackDelays =
+    [
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromMilliseconds(1000),
+        TimeSpan.FromMilliseconds(2000),
+    ];
+
     private readonly BinanceApiClient _api;
     private readonly BinanceExchangeInfoProvider _exchangeInfo;
     private readonly bool _ownsExchangeInfo;
+    private readonly TimeProvider _timeProvider;
     private bool _disposed;
 
     /// <summary>
@@ -130,6 +158,7 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
         ArgumentNullException.ThrowIfNull(exchangeInfo);
 
         _api = new BinanceApiClient(http, options, timeProvider);
+        _timeProvider = timeProvider ?? TimeProvider.System;
 
         if (exchangeInfo.Endpoints != _api.Endpoints)
         {
@@ -153,6 +182,12 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
     /// The trading-rule provider.
     /// </summary>
     public BinanceExchangeInfoProvider ExchangeInfo => _exchangeInfo;
+
+    /// <summary>
+    /// 撤銷條件單之後回查的等待間隔。只給測試縮短用。
+    /// The waits between read-backs after cancelling a conditional order; exposed only so tests can shorten them.
+    /// </summary>
+    internal IReadOnlyList<TimeSpan> CancelReadBackDelays { get; set; } = DefaultCancelReadBackDelays;
 
     /// <inheritdoc />
     public Task<Result<IReadOnlyList<SymbolInfo>>> GetSymbolsAsync(CancellationToken cancellationToken = default) =>
@@ -806,6 +841,22 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
     /// "the mapping missed something". One extra request of weight 1 buys not lying in the return value.
     /// </para>
     /// <para>
+    /// <b>回查可能不只一次,最多約等 3.75 秒。</b>2026-09-14 Testnet 實測,查詢端點落後於撤單:
+    /// 撤單成功後緊接著的回查仍回 <c>NEW</c>,或暫時回 <c>-2013</c>。回查結果還不是終態、或查不到時,
+    /// 依 <see cref="DefaultCancelReadBackDelays"/> 再查;等完仍是未結狀態,回傳
+    /// <see cref="TradeErrorCodes.ExchangeUnavailable"/>(暫時性)並在訊息裡說明撤單本身已經成功。
+    /// 要即時知道撤單結果,訂 <see cref="BinanceUserDataFeed.SubscribeConditionalOrderUpdatesAsync"/>:
+    /// 實測 <c>ALGO_UPDATE</c> 的 CANCELED 比 <c>DELETE</c> 的回應還早到。
+    /// <b>The read-back may repeat, waiting about 3.75 s at most.</b> Measured on Testnet on 2026-09-14, the query
+    /// endpoint lags the cancellation: the immediate read-back still says <c>NEW</c> or briefly answers
+    /// <c>-2013</c>. While the read-back is not final or finds nothing, it is repeated on the
+    /// <see cref="DefaultCancelReadBackDelays"/> schedule; still open at the end, the result is
+    /// <see cref="TradeErrorCodes.ExchangeUnavailable"/> (transient) with a message saying the cancellation itself
+    /// succeeded. For the outcome as it happens, subscribe to
+    /// <see cref="BinanceUserDataFeed.SubscribeConditionalOrderUpdatesAsync"/>: the <c>ALGO_UPDATE</c> CANCELED
+    /// event was measured arriving before the <c>DELETE</c> response.
+    /// </para>
+    /// <para>
     /// 撤單本身是冪等的,因此標記為可重試。若 <c>DELETE</c> 成功而後面那次 <c>GET</c> 失敗,
     /// 回傳的是失敗,但訊息會明講「撤單已經成功」—— 呼叫端據此重試是安全的(再撤一次不會有副作用),
     /// 而反過來把它當成「撤單失敗、停損還掛著」也是安全的方向。
@@ -852,20 +903,68 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
             return cancelled.ToFailure<ConditionalOrder>();
         }
 
+        // 查詢端點落後於撤單:剛撤完的那一刻,回查可能還是 NEW,也可能暫時查不到(-2013)。
+        // 兩種都代表「還沒同步」而不是撤單失敗,所以在有限的預算內再查;見 DefaultCancelReadBackDelays。
+        // The query endpoint lags the cancellation: right afterwards the read-back may still say NEW or may
+        // briefly not find the order (-2013). Both mean "not caught up yet" rather than a failed cancellation, so
+        // it is read again within a bounded budget; see DefaultCancelReadBackDelays.
         var reread = await GetConditionalOrderAsync(symbol, cancelledIdentifier, cancellationToken)
             .ConfigureAwait(false);
 
-        return reread.IsSuccess
-            ? reread
-            : new Error(
-                reread.Error!.Code,
-                $"{reread.Error.Message}(撤單本身已經成功,失敗的是撤完之後的回查;{cancelledIdentifier} 這張條件單已經不在了。The cancellation itself succeeded and it is the follow-up lookup that failed; conditional order {cancelledIdentifier} is gone.)",
-                reread.Error.Category)
+        foreach (var delay in CancelReadBackDelays)
+        {
+            if (!IsCancelReadBackLagging(reread))
             {
-                Exception = reread.Error.Exception,
-                Data = reread.Error.Data,
-            };
+                break;
+            }
+
+            await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
+
+            reread = await GetConditionalOrderAsync(symbol, cancelledIdentifier, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (reread.TryGetValue(out var order))
+        {
+            if (order.Status.IsFinal())
+            {
+                return reread;
+            }
+
+            // 等完預算仍是未結狀態。撤單已被交易所確認,把快照照抄回去會讓呼叫端以為停損還掛著而再撤一次,
+            // 把狀態改寫成 Canceled 則是在回傳值裡替交易所說話 —— 兩者都不誠實,所以回報失敗並講清楚。
+            // 分類是 Unavailable(暫時性):稍後再查一次就會得到正確答案。
+            // Still open after the whole budget. The exchange has confirmed the cancellation, so echoing the
+            // snapshot would tell the caller the stop still rests, while rewriting the status to Canceled would
+            // speak for the exchange in the return value; neither is honest, so this fails and says why. The
+            // category is Unavailable, which is transient: a later lookup gives the right answer.
+            return new Error(
+                    TradeErrorCodes.ExchangeUnavailable,
+                    $"撤單本身已經成功,但交易所的查詢端點在等待之後仍回報 {cancelledIdentifier} 為 {order.Status};請稍後再以 GetConditionalOrderAsync 確認。The cancellation itself succeeded, but after waiting the exchange's query endpoint still reports {cancelledIdentifier} as {order.Status}; confirm later with GetConditionalOrderAsync.",
+                    ErrorCategory.Unavailable)
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        return new Error(
+            reread.Error!.Code,
+            $"{reread.Error.Message}(撤單本身已經成功,失敗的是撤完之後的回查;{cancelledIdentifier} 這張條件單已經不在了。The cancellation itself succeeded and it is the follow-up lookup that failed; conditional order {cancelledIdentifier} is gone.)",
+            reread.Error.Category)
+        {
+            Exception = reread.Error.Exception,
+            Data = reread.Error.Data,
+        };
     }
+
+    /// <summary>
+    /// 撤單之後的回查結果是否只是查詢端點還沒跟上。
+    /// Whether a read-back after cancellation merely shows the query endpoint lagging behind.
+    /// </summary>
+    /// <param name="reread">回查結果。The read-back result.</param>
+    /// <returns>應該再查一次時為 <see langword="true"/>。<see langword="true"/> when it is worth reading again.</returns>
+    private static bool IsCancelReadBackLagging(Result<ConditionalOrder> reread) =>
+        reread.TryGetValue(out var order)
+            ? !order.Status.IsFinal()
+            : string.Equals(reread.Error!.Code, TradeErrorCodes.ConditionalOrderNotFound, StringComparison.Ordinal);
 
     /// <summary>
     /// 查詢單一條件單。
@@ -895,6 +994,22 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
     /// fill disappears <b>3 days</b> after creation, and anything at all disappears after <b>90 days</b>. A
     /// miss answers <see cref="TradeErrorCodes.ConditionalOrderNotFound"/>, which means "not found" rather
     /// than "never existed".
+    /// </para>
+    /// <para>
+    /// <b>剛送出的條件單,這個查詢會暫時查不到。</b>2026-09-14 Testnet 實測:送單成功之後約 1.1–1.5 秒內,
+    /// 以 algoId 或 clientAlgoId 查詢都回 <c>-2013 Order does not exist</c>,同一時間
+    /// <see cref="GetOpenConditionalOrdersAsync"/> 已經列得出它;撤單剛成功時也可能暫時回 <c>-2013</c> 或舊的
+    /// <c>NEW</c>。文件沒有提到這段落後。因此送單逾時之後,<b>緊接著</b>查不到<b>不能</b>當成
+    /// 「沒送進去、可以重送」—— 那正是重複掛出兩張停損的路徑。先查
+    /// <see cref="GetOpenConditionalOrdersAsync"/>(帶商品代碼),或隔幾秒再以這個方法確認。
+    /// <b>A conditional order just placed is briefly not found here.</b> Measured on Testnet on 2026-09-14: for
+    /// about 1.1–1.5 s after a successful placement, lookups by algoId and by clientAlgoId both answered
+    /// <c>-2013 Order does not exist</c> while <see cref="GetOpenConditionalOrdersAsync"/> already listed the
+    /// order; right after a cancellation the lookup may likewise answer <c>-2013</c> or a stale <c>NEW</c>. The
+    /// documentation mentions no such lag. A miss <b>immediately</b> after a timed-out placement therefore must
+    /// <b>not</b> be read as "it never landed, resend" — that is exactly how two stops end up resting. Check
+    /// <see cref="GetOpenConditionalOrdersAsync"/> with the symbol first, or confirm with this method a few
+    /// seconds later.
     /// </para>
     /// </remarks>
     public async Task<Result<ConditionalOrder>> GetConditionalOrderAsync(

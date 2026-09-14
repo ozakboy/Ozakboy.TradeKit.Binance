@@ -92,6 +92,64 @@ internal static class BinanceJson
     }
 
     /// <summary>
+    /// 讀取十進位屬性,與 <see cref="TryGetDecimal"/> 相同,但字串形式<b>也接受科學記號</b>。
+    /// Reads a decimal property like <see cref="TryGetDecimal"/>, except that the string form <b>also accepts
+    /// exponent notation</b>.
+    /// </summary>
+    /// <param name="element">來源物件。The source object.</param>
+    /// <param name="propertyName">屬性名。The property name.</param>
+    /// <param name="value">讀到的值。The value that was read.</param>
+    /// <returns>解析成功時為 <see langword="true"/>。<see langword="true"/> when parsed.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>只給 Algo Service 的回應用,是本類別「一律拒絕科學記號」的唯一例外。</b>
+    /// 2026-09-14 Testnet 實測:<c>GET /fapi/v1/openAlgoOrders</c> 把數量 0.0007 寫成 <c>"7.0E-4"</c>
+    /// (同一張單在 <c>POST</c> / <c>GET /fapi/v1/algoOrder</c> 與 <c>ALGO_UPDATE</c> 裡都是 <c>"0.0007"</c>),
+    /// 價格也是 <c>"74457.1"</c>、<c>"0.0"</c> 這種浮點數轉字串的樣子;官方文件的範例則全是固定小數。
+    /// 那是 Java <c>Double.toString</c> 的輸出:小於 10⁻³ 或大於等於 10⁷ 就改用科學記號,
+    /// 所以數量上千萬的低價幣也會中。
+    /// <b>For Algo Service responses only — the one exception to this class's refusal of exponents.</b> Measured
+    /// on Testnet on 2026-09-14: <c>GET /fapi/v1/openAlgoOrders</c> writes a quantity of 0.0007 as
+    /// <c>"7.0E-4"</c> (the same order reads <c>"0.0007"</c> on <c>POST</c> / <c>GET /fapi/v1/algoOrder</c> and on
+    /// <c>ALGO_UPDATE</c>), and prices look like <c>"74457.1"</c> and <c>"0.0"</c>, while every example in the
+    /// documentation is fixed-point. That is Java's <c>Double.toString</c>, which switches to exponent notation
+    /// below 10⁻³ and at or above 10⁷, so a low-priced coin with a quantity in the tens of millions is affected
+    /// too.
+    /// </para>
+    /// <para>
+    /// 用 <see cref="TryGetDecimal"/> 讀,那個欄位會解析失敗而被當成缺欄位 —— 未結清單上的停損數量
+    /// 變成 0,對帳會以為那張停損什麼都沒保護。<see cref="Precision.TryParsePlain"/> 的文件指明
+    /// 「真的需要容忍的呼叫端自己指定 <see cref="System.Globalization.NumberStyles.Float"/>」,
+    /// 這裡就是那個看得見的決定。<see cref="decimal"/> 解析科學記號是精確的,不經過二進位浮點數。
+    /// Read through <see cref="TryGetDecimal"/> the field fails to parse and is treated as absent: a stop on the
+    /// open listing reports a quantity of zero and reconciliation concludes it protects nothing. The documentation
+    /// of <see cref="Precision.TryParsePlain"/> tells a caller that genuinely needs tolerance to ask for
+    /// <see cref="System.Globalization.NumberStyles.Float"/> itself; this is that visible decision. Parsing an
+    /// exponent into a <see cref="decimal"/> is exact and never passes through a binary floating-point value.
+    /// </para>
+    /// </remarks>
+    public static bool TryGetDecimalAllowingExponent(JsonElement element, string propertyName, out decimal value)
+    {
+        value = 0m;
+
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            return false;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.String => decimal.TryParse(
+                property.GetString(),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out value),
+            JsonValueKind.Number => property.TryGetDecimal(out value),
+            _ => false,
+        };
+    }
+
+    /// <summary>
     /// 讀取 32 位元整數屬性,字串與數值兩種形式都接受。
     /// Reads a 32-bit integer property, accepting both the string and the numeric form.
     /// </summary>

@@ -261,6 +261,7 @@ public sealed class BinanceUserDataTestnetTests
                     ConditionalOrderType.StopMarket,
                     conditionalAccepted.ConditionalOrder.ConditionalOrderType);
                 Assert.AreEqual(price, conditionalAccepted.ConditionalOrder.TriggerPrice);
+                Assert.AreEqual(quantity, conditionalAccepted.ConditionalOrder.Quantity);
                 Assert.IsNull(
                     conditionalAccepted.ConditionalOrder.TriggeredOrderId,
                     "這張條件單觸發了 —— 觸發價離標記價不夠遠。");
@@ -270,7 +271,12 @@ public sealed class BinanceUserDataTestnetTests
                     ConditionalOrderIdentifier.FromClientId(clientAlgoId),
                     cts.Token);
 
+                // 2026-09-14 實測:這裡曾經紅燈 —— 撤單成功,緊接著的回查卻回 -2013。
+                // CancelConditionalOrderAsync 現在會等查詢端點跟上,所以狀態必須是 Canceled。
+                // Measured on 2026-09-14: this went red once — the cancellation succeeded and the immediate
+                // read-back answered -2013. CancelConditionalOrderAsync now waits for the query endpoint.
                 Assert.IsTrue(conditionalCancelled.IsSuccess, conditionalCancelled.Error?.Message);
+                Assert.AreEqual(ConditionalOrderStatus.Canceled, conditionalCancelled.GetValueOrThrow().Status);
 
                 var conditionalCancelEvent = await AwaitConditionalOrderAsync(
                     conditionals,
