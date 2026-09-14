@@ -470,7 +470,7 @@ public sealed class BinanceTestnetIntegrationTests
             Assert.Fail("條件單竟然被 /fapi/v1/order 接受了,-4120 的限制已經解除,請重新評估條件單支援。");
         }
 
-        Assert.AreEqual(TradeErrorCodes.NotSupported, placed.Error!.Code);
+        Assert.AreEqual(TradeErrorCodes.ConditionalOrderPathRequired, placed.Error!.Code);
         Assert.IsFalse(placed.Error.IsTransient);
         Assert.IsTrue(placed.Error.TryGetInt64(BinanceErrorDataKeys.ApiCode, out var apiCode));
         Assert.AreEqual((long)BinanceApiErrorCodes.OrderTypeNotSupportedOnEndpoint, apiCode);

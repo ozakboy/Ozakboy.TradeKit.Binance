@@ -70,6 +70,17 @@ supplies the missing path.
   **The algo endpoints have no error codes of their own**; the only algo-related entry on the official page is
   `-4120`. Failures on the conditional path are therefore re-labelled at the call site from the raw code,
   because sharing them leaves callers unable to tell "the stop is gone" from "the entry is gone".
+- **`-4120` 改對映到 `trade.conditional_order_path_required`**,不再是籠統的 `trade.not_supported`,
+  訊息也直接指名 `PlaceConditionalOrderAsync`。收到這一碼的人幾乎都是「程式碼寫在條件單搬家以前」,
+  需要的是下一步怎麼做,不是再一句「不被接受」。
+  請求仍然照送、不在本地攔截:舊端點拒絕條件單這件事由一條 Testnet 測試釘著,
+  哪天它又被接受了那條測試要紅 —— 本地攔掉就等於把那個哨兵拆了。
+  **`-4120` now maps to `trade.conditional_order_path_required`** rather than a generic
+  `trade.not_supported`, and the message names `PlaceConditionalOrderAsync`. Whoever sees this code almost
+  always has code written before the migration and needs the next step, not another way of saying "not
+  accepted". The request is still sent rather than short-circuited locally: a Testnet test pins the refusal
+  down so that it goes red the day Binance accepts these again, and catching it locally would remove that
+  sentinel.
 - **`-4116 DUPLICATED_CLIENT_ORDER_ID` 先前完全沒有對映**,一律落到
   `trade.unknown_exchange_error`。這一碼在冪等送單下**不是壞消息**:它代表那張單已經進去了,
   正確反應是用同一個編號查單,不是換一個編號重送。現在對映到

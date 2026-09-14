@@ -358,8 +358,8 @@ public static class BinanceErrorMapper
             (TradeErrorCodes.NotSupported, ErrorCategory.NotSupported, string.Empty),
 
         BinanceApiErrorCodes.OrderTypeNotSupportedOnEndpoint =>
-            (TradeErrorCodes.NotSupported, ErrorCategory.NotSupported,
-                "(這個委託類型已不由 /fapi/v1/order 受理,幣安要求改用 Algo Order 專用端點;2026-09-11 在 Testnet 實測,STOP_MARKET 與 TRAILING_STOP_MARKET 都是這一碼。參數沒有錯,改參數也不會過。This order type is no longer accepted on /fapi/v1/order and Binance directs it to the Algo Order endpoints; measured on Testnet on 2026-09-11 for both STOP_MARKET and TRAILING_STOP_MARKET. The parameters are not at fault and editing them will not help.)"),
+            (TradeErrorCodes.ConditionalOrderPathRequired, ErrorCategory.Validation,
+                "(這個委託類型已不由 /fapi/v1/order 受理,請改呼叫 BinanceFuturesClient.PlaceConditionalOrderAsync,它打的是 /fapi/v1/algoOrder;2026-09-11 在 Testnet 實測,STOP_MARKET 與 TRAILING_STOP_MARKET 都是這一碼。參數沒有錯,改參數也不會過。This order type is no longer accepted on /fapi/v1/order: call BinanceFuturesClient.PlaceConditionalOrderAsync instead, which uses /fapi/v1/algoOrder. Measured on Testnet on 2026-09-11 for both STOP_MARKET and TRAILING_STOP_MARKET. The parameters are not at fault and editing them will not help.)"),
 
         BinanceApiErrorCodes.InvalidTimestamp =>
             (TradeErrorCodes.TimestampOutOfSync, ErrorCategory.Validation,

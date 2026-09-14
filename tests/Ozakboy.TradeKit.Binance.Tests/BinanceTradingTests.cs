@@ -787,9 +787,13 @@ public sealed class BinanceTradingTests
             });
 
             Assert.IsTrue(result.IsFailure);
-            Assert.AreEqual(TradeErrorCodes.NotSupported, result.Error!.Code);
+            // -4120 對映到條件單專屬的代碼,而不是籠統的「不支援」:收到它的人需要的是
+            // 「改呼叫哪一個方法」,不是再一句「不被接受」。
+            // -4120 maps to the conditional-specific code rather than a generic "not supported": whoever
+            // reads it needs the method to call instead, not another way of saying "not accepted".
+            Assert.AreEqual(TradeErrorCodes.ConditionalOrderPathRequired, result.Error!.Code);
             Assert.IsFalse(result.Error.IsTransient);
-            StringAssert.Contains(result.Error.Message, "Algo Order", StringComparison.Ordinal);
+            StringAssert.Contains(result.Error.Message, "PlaceConditionalOrderAsync", StringComparison.Ordinal);
 
             // 就算失敗,編號也要回得來 —— 那張單有沒有進去只有它查得出來。
             // The id comes back even on failure: it is the only way to find out whether the order landed.
