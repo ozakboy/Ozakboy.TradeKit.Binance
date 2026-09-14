@@ -106,4 +106,30 @@ internal static class BinanceApiPaths
 
     /// <summary>調整保證金模式。Change the margin type.</summary>
     public const string MarginType = "fapi/v1/marginType";
+
+    /// <summary>
+    /// 帳戶成交紀錄。The account's own trade list.
+    /// </summary>
+    /// <remarks>
+    /// 這是對帳補查的來源,不是給畫面看歷史用的。成交平常由使用者資料串流推過來,而串流會斷 ——
+    /// 斷線期間的成交沒有任何人補,部位與已實現損益就從那一刻起一路錯下去。
+    /// This backs the reconciliation sweep rather than a history view. Fills normally arrive on the user data
+    /// stream, that stream drops, and nothing else backfills what happened while it was down — after which the
+    /// position and the realised P&amp;L stay wrong.
+    /// </remarks>
+    public const string UserTrades = "fapi/v1/userTrades";
+
+    /// <summary>
+    /// <see cref="UserTrades"/> 單次可回傳的最大筆數。
+    /// The most fills <see cref="UserTrades"/> returns in one response.
+    /// </summary>
+    /// <remarks>
+    /// 來源:官方 USDⓈ-M Futures 的 Account Trade List 端點(<c>limit</c> 預設 500、最大 1000),
+    /// 擷取日期 2026-09-14。超過上限不會被交易所截斷成 1000,而是回 <c>-1130</c> 參數不合法,
+    /// 因此本套件在送出之前就先擋下來並說明要分頁。
+    /// Source: the Account Trade List endpoint of the official USDⓈ-M Futures documentation (<c>limit</c>
+    /// defaults to 500 and caps at 1000), retrieved 2026-09-14. Exceeding it is answered with <c>-1130</c>
+    /// rather than silently clamped, so the request is refused locally with a note to page instead.
+    /// </remarks>
+    public const int MaxUserTradesLimit = 1000;
 }

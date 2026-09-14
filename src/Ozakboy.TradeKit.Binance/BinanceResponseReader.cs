@@ -345,6 +345,56 @@ public static class BinanceResponseReader
     }
 
     /// <summary>
+    /// 解析帳戶成交紀錄的回應(<c>GET /fapi/v1/userTrades</c>)。
+    /// Parses the account trade list response (<c>GET /fapi/v1/userTrades</c>).
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <returns>成交清單,或失敗原因。The fills, or the reason it failed.</returns>
+    /// <remarks>
+    /// 這裡<b>不</b>接受「時刻拿不到就用現在時間頂替」的做法,與委託的解析不同。委託少一個時間欄位只是
+    /// 顯示難看,成交的時刻卻是對帳補查的游標:一筆成交被記成「現在」,下一次補查的起點就被推到未來,
+    /// 中間真正漏掉的成交從此再也查不回來,而且帳上看起來完全正常。
+    /// Unlike the order readers, nothing here falls back to "use the current time when the timestamp is
+    /// missing". A missing timestamp on an order is cosmetic; on a fill it is the reconciliation cursor. Record
+    /// one fill as happening now and the next sweep starts in the future, so the fills genuinely missed in
+    /// between are never recovered — and the books look entirely normal.
+    /// </remarks>
+    public static Result<IReadOnlyList<Trade>> ReadUserTrades(string json)
+    {
+        var parsed = TryParse(json, BinanceApiPaths.UserTrades);
+
+        if (!parsed.TryGetValue(out var document))
+        {
+            return parsed.ToFailure<IReadOnlyList<Trade>>();
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return BinanceErrors.MalformedResponse(
+                    "userTrades 的回應不是 JSON 陣列。The userTrades response is not a JSON array.");
+            }
+
+            var trades = new List<Trade>(document.RootElement.GetArrayLength());
+
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                var trade = ReadUserTrade(element);
+
+                if (!trade.TryGetValue(out var value))
+                {
+                    return trade.ToFailure<IReadOnlyList<Trade>>();
+                }
+
+                trades.Add(value);
+            }
+
+            return Result.Success<IReadOnlyList<Trade>>(trades);
+        }
+    }
+
+    /// <summary>
     /// 解析撤銷單張條件單的回應(<c>DELETE /fapi/v1/algoOrder</c>),取出被撤掉的那張的識別碼。
     /// Parses the cancel response of one conditional order (<c>DELETE /fapi/v1/algoOrder</c>) and returns the
     /// identifier of what was cancelled.
@@ -539,6 +589,127 @@ public static class BinanceResponseReader
             CreatedAt = BinanceJson.TryGetTimestamp(element, "time", out var createdAt) ? createdAt : updatedAt,
             UpdatedAt = updatedAt,
         };
+    }
+
+    private static Result<Trade> ReadUserTrade(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return BinanceErrors.MalformedResponse(
+                "成交清單的元素不是 JSON 物件。An element of the trade list is not a JSON object.");
+        }
+
+        if (!BinanceJson.TryGetString(element, "symbol", out var symbol))
+        {
+            return BinanceErrors.MissingField("symbol", BinanceApiPaths.UserTrades);
+        }
+
+        // 成交編號是去重的唯一依據。補查回來的清單一定會與串流已收到的重疊(起點取的是最後一筆的時間本身),
+        // 沒有這個編號就只能靠「時間 + 價格 + 數量」猜,而同一毫秒同價同量的兩筆成交在合約上很常見。
+        // The trade id is the only basis for de-duplication. A sweep always overlaps with what the stream
+        // already delivered, and without the id the alternative is guessing from time, price, and quantity —
+        // two fills sharing all three inside one millisecond are commonplace on a futures book.
+        if (!BinanceJson.TryGetInt64(element, "id", out var tradeId))
+        {
+            return BinanceErrors.MissingField("id", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var side = ReadTradeSide(element);
+
+        if (side == OrderSide.Unspecified)
+        {
+            // 方向對不上不放行,理由與委託相同:方向就是「這筆成交讓部位往哪邊動」的全部資訊。
+            // An unmapped side is refused for the same reason as on an order: the side is the whole answer to
+            // which way this fill moved the position.
+            return BinanceErrors.MalformedResponse(
+                    $"{symbol} 的成交方向無法對映,side 與 buyer 兩個欄位都讀不出方向。The side of a fill on {symbol} maps to nothing; neither side nor buyer yielded a direction.")
+                .WithData(BinanceErrorDataKeys.Field, "side")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, "price", out var price))
+        {
+            return BinanceErrors.MissingField("price", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        if (!BinanceJson.TryGetDecimal(element, "qty", out var quantity))
+        {
+            return BinanceErrors.MissingField("qty", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        if (!BinanceJson.TryGetTimestamp(element, "time", out var executedAt))
+        {
+            return BinanceErrors.MissingField("time", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var hasFee = BinanceJson.TryGetDecimal(element, "commission", out var fee);
+        var hasFeeAsset = BinanceJson.TryGetString(element, "commissionAsset", out var feeAsset);
+
+        if (hasFee && !hasFeeAsset)
+        {
+            // 手續費沒有幣別就是一個不能用的數字:合約帳戶可以用別的資產抵扣,把它當計價幣直接從損益裡扣,
+            // 對帳會差一截,而差多少要看那個資產當天的價格。寧可在這裡失敗,也不要交出一個算得出來的錯數。
+            // A fee without its currency is a number that cannot be used: a derivatives account may pay in a
+            // different asset, and subtracting it from quote-currency P&L leaves a gap whose size depends on
+            // that asset's price on the day. Failing here beats handing out a wrong figure that still adds up.
+            return BinanceErrors.MissingField("commissionAsset", symbol)
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        return new Trade
+        {
+            Symbol = symbol,
+
+            // 編號在幣安是數值,中立模型用字串裝 —— 別的交易所的成交編號不一定是數字。
+            // The id is numeric here while the neutral model stores a string, because other exchanges do not
+            // necessarily use numbers.
+            TradeId = tradeId.ToString(CultureInfo.InvariantCulture),
+            ExchangeOrderId = BinanceJson.TryGetInt64(element, "orderId", out var orderId)
+                ? orderId.ToString(CultureInfo.InvariantCulture)
+                : null,
+
+            // 這個端點不回 clientOrderId。留成 null 而不是填空字串:空字串會讓「沒有這項資訊」
+            // 看起來像「這張單的用戶端編號是空的」。
+            // This endpoint does not return a clientOrderId. It stays null rather than empty, because an empty
+            // string makes "not reported" look like "the order's client id was blank".
+            ClientOrderId = null,
+            Side = side,
+            PositionSide = ReadPositionSide(element),
+            Price = price,
+            Quantity = quantity,
+            Fee = hasFee ? fee : 0m,
+            FeeAsset = hasFeeAsset ? feeAsset : string.Empty,
+            RealizedPnl = BinanceJson.TryGetDecimal(element, "realizedPnl", out var realizedPnl) ? realizedPnl : 0m,
+            IsMaker = BinanceJson.TryGetBoolean(element, "maker", out var maker) && maker,
+            ExecutedAt = executedAt,
+        };
+    }
+
+    /// <summary>
+    /// 讀出一筆成交的買賣方向:先看 <c>side</c>,讀不到再退回布林的 <c>buyer</c>。
+    /// Reads the side of a fill, preferring <c>side</c> and falling back to the boolean <c>buyer</c>.
+    /// </summary>
+    /// <remarks>
+    /// 兩個欄位講的是同一件事,但幣安在不同時期的回應裡不一定兩個都給。先認 <c>side</c> 是因為它與委託
+    /// 那邊同一套字彙;<c>buyer</c> 只在前者缺席時才用,而不是拿來覆蓋它 —— 兩個都讀、以其中一個為準,
+    /// 才不會在欄位不一致時靜默選到另一個意思。
+    /// The two fields say the same thing, but Binance has not always sent both. <c>side</c> comes first because
+    /// it shares its vocabulary with the order endpoints; <c>buyer</c> only stands in when <c>side</c> is
+    /// absent rather than overriding it, so an inconsistency between them cannot quietly flip the direction.
+    /// </remarks>
+    private static OrderSide ReadTradeSide(JsonElement element)
+    {
+        var side = BinanceOrderMapper.ParseOrderSide(
+            BinanceJson.TryGetString(element, "side", out var sideText) ? sideText : null);
+
+        if (side != OrderSide.Unspecified)
+        {
+            return side;
+        }
+
+        return BinanceJson.TryGetBoolean(element, "buyer", out var buyer)
+            ? buyer ? OrderSide.Buy : OrderSide.Sell
+            : OrderSide.Unspecified;
     }
 
     private static Result<ConditionalOrder> ReadConditionalOrder(JsonElement element, DateTimeOffset asOf)

@@ -48,6 +48,31 @@ supplies the missing path.
   不帶商品代碼是 **40**,帶了是 1。對帳輪詢務必帶上商品代碼。
   Five conditional endpoint weights, including `OpenAlgoOrders(bool hasSymbol)`: **40** without a symbol
   against 1 with one. Reconciliation polling must pass the symbol.
+- **`BinanceFuturesClient.GetUserTradesAsync`**(`GET /fapi/v1/userTrades`,權重 **5**):查帳戶在某個商品上的
+  成交紀錄,參數 `symbol`(必填)、`startTime`(由 `since` 對映)、`fromId`、`limit`(上限 **1000**,
+  不給則由幣安取預設值 500)。這是給**對帳補查**用的:成交平常由使用者資料串流推過來,而串流會斷 ——
+  斷線期間的成交沒有任何人補,部位與已實現損益就從那一刻起一路錯下去,畫面與日誌都看不出來。
+  引擎定期以及每次重連之後,以本地最後一筆成交的時間當起點回頭補查;補查**一定會與已收到的重疊**
+  (起點取的是那一筆的時間本身),所以呼叫端必須以 `Trade.TradeId` 去重。
+  兩件在送出之前就擋下來的事:`since` 與 `fromId` 同時給(**幣安不接受** `startTime` 與 `fromId` 並存,
+  靜默丟掉一個會讓起點不是呼叫端以為的那一個)、`limit` 超過 1000(悄悄夾到上限會讓補查以為缺口補完了,
+  剩下的成交從此沒有人再查)。另外,缺 `time`、缺 `id`、或有 `commission` 卻沒有 `commissionAsset` 的成交
+  一律解析失敗而不是補一個預設值 —— 時刻是下一次補查的游標、編號是去重的唯一依據,
+  而沒有幣別的手續費是個不能拿來算的數字。時間跨度限制仍由幣安決定:不給起點只回最近 7 天,
+  單次查詢也以 7 天為限,更長的缺口要自己分段補。
+  Queries the account's own fills on one symbol, mapping `since` to `startTime`, with `limit` capped at **1000**
+  (Binance's own default of 500 applies when it is omitted). It backs the **reconciliation sweep**: fills
+  normally arrive on the user data stream, that stream drops, and nothing else backfills what was missed, after
+  which the position and the realised P&L stay wrong with nothing on screen to show it. The engine sweeps
+  periodically and after every reconnection from the timestamp of its last known fill, and such a sweep
+  **always overlaps** with what the stream already delivered, so callers de-duplicate on `Trade.TradeId`. Two
+  things are refused before anything is sent: `since` together with `fromId` (**Binance does not accept**
+  `startTime` alongside `fromId`, and dropping one silently would start the sweep somewhere the caller did not
+  choose) and a `limit` above 1000 (clamping quietly would let the sweep conclude the gap is closed). A fill
+  missing `time` or `id`, or carrying a `commission` without a `commissionAsset`, fails the parse rather than
+  receiving a default: the timestamp is the next sweep's cursor, the id is the only basis for de-duplication,
+  and a fee without its currency cannot be used in a calculation. The seven-day limits are still Binance's:
+  without a cursor only the last seven days come back, and one query may not span more than seven days either.
 
 ### 破壞性變更 / Breaking
 

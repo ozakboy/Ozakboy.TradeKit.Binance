@@ -1,3 +1,5 @@
+using System.Globalization;
+
 using Ozakboy.Http;
 using Ozakboy.Http.Retry;
 using Ozakboy.Http.Signing;
@@ -48,6 +50,7 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
     private const string CancelAllConditionalOrdersOperation = "撤銷全部條件單 / cancel all conditional orders";
     private const string QueryConditionalOrderOperation = "查詢條件單 / query conditional order";
     private const string OpenConditionalOrdersOperation = "查詢未結條件單 / open conditional orders query";
+    private const string UserTradesOperation = "查詢成交紀錄 / user trades query";
 
     /// <summary>
     /// 查詢未結條件單時用來限定只看條件單的參數名。
@@ -1157,6 +1160,101 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
         return IsNoChangeNeeded(body.Error!)
             ? Result.Success()
             : body.ToResult();
+    }
+
+    /// <summary>
+    /// 查詢帳戶在某個商品上的成交紀錄(<c>GET /fapi/v1/userTrades</c>,權重 5)。
+    /// Lists the account's own fills on one symbol (<c>GET /fapi/v1/userTrades</c>, weight 5).
+    /// </summary>
+    /// <param name="symbol">交易對代碼,必填。The symbol; required.</param>
+    /// <param name="since">
+    /// 起點時刻,對映到 <c>startTime</c>;與 <paramref name="fromId"/> 擇一。
+    /// The starting instant, sent as <c>startTime</c>; mutually exclusive with <paramref name="fromId"/>.
+    /// </param>
+    /// <param name="fromId">
+    /// 起點成交編號,對映到 <c>fromId</c>;與 <paramref name="since"/> 擇一。
+    /// The starting trade id, sent as <c>fromId</c>; mutually exclusive with <paramref name="since"/>.
+    /// </param>
+    /// <param name="limit">
+    /// 單次筆數上限,最大 1000;<see langword="null"/> 交由幣安取它自己的預設值 500。
+    /// The per-response cap, at most 1000; <see langword="null"/> leaves Binance's own default of 500 in place.
+    /// </param>
+    /// <param name="cancellationToken">取消權杖。The cancellation token.</param>
+    /// <returns>成交清單,或失敗原因。The fills, or the reason it failed.</returns>
+    /// <exception cref="ObjectDisposedException">
+    /// 實例已釋放時擲出。Thrown when the instance has been disposed.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// 幣安<b>不接受</b> <c>fromId</c> 與 <c>startTime</c> 同時出現,所以兩個都給會在這裡就被擋下來,
+    /// 而不是送出去換一個看不出原因的參數錯誤。兩個都不給時幣安只回最近 7 天,而且單次查詢的時間跨度
+    /// 也以 7 天為限 —— 中斷超過一週的缺口必須自己分段補,不能指望一個 <c>since</c> 就撈得回來。
+    /// Binance <b>does not accept</b> <c>fromId</c> together with <c>startTime</c>, so supplying both is
+    /// refused here instead of travelling out to come back as an opaque parameter error. Supplying neither
+    /// returns the last seven days only, and one query may not span more than seven days either: a gap wider
+    /// than a week has to be swept in segments rather than in one call.
+    /// </para>
+    /// <para>
+    /// 補查回來的清單<b>一定會與串流已收到的重疊</b>,因為 <paramref name="since"/> 取的是本地最後一筆成交
+    /// 的時間本身而不是它之後一瞬間。呼叫端必須以 <see cref="Trade.TradeId"/> 去重。
+    /// The returned list <b>always overlaps</b> with what the stream already delivered, because
+    /// <paramref name="since"/> is the local last fill's own timestamp rather than an instant after it. Callers
+    /// de-duplicate on <see cref="Trade.TradeId"/>.
+    /// </para>
+    /// </remarks>
+    public async Task<Result<IReadOnlyList<Trade>>> GetUserTradesAsync(
+        string symbol,
+        DateTimeOffset? since = null,
+        long? fromId = null,
+        int? limit = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return TradeErrors.InvalidQuery("交易對代碼不可為空白。The symbol must not be blank.");
+        }
+
+        if (since is not null && fromId is not null)
+        {
+            return TradeErrors.InvalidQuery(
+                    "since 與 fromId 只能擇一:幣安不接受 startTime 與 fromId 同時出現,靜默丟掉其中一個會讓補查的起點不是呼叫端以為的那一個。Supply either since or fromId: Binance does not accept startTime together with fromId, and quietly dropping one would start the sweep somewhere the caller did not choose.")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        if (limit is { } requested && (requested < 1 || requested > BinanceApiPaths.MaxUserTradesLimit))
+        {
+            // 不悄悄夾到上限。要五千筆卻只拿到一千筆,補查會以為缺口補完了,而剩下的成交從此沒有人再查 ——
+            // 部位與已實現損益就停在一個錯的數字上,而且看起來很正常。
+            // The limit is not quietly clamped: asking for five thousand and receiving one thousand lets the
+            // sweep conclude the gap is closed, after which nothing ever looks for the fills left behind, and
+            // the position and realised P&L settle on a wrong number that looks perfectly ordinary.
+            return TradeErrors.InvalidQuery(
+                    string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"單次最多只能查 {BinanceApiPaths.MaxUserTradesLimit} 筆成交,收到 {requested};請自行分頁,以這一頁最後一筆的成交編號當下一頁的 fromId。At most {BinanceApiPaths.MaxUserTradesLimit} fills may be fetched in one request but {requested} were asked for; page the query instead, using the last fill's id as the next fromId."))
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var query = QueryParameters.CreateBuilder().Add(BinanceConstants.SymbolParameterName, symbol);
+
+        query.AddIfNotNull(BinanceConstants.StartTimeParameterName, since?.ToUnixTimeMilliseconds());
+        query.AddIfNotNull(BinanceConstants.FromIdParameterName, fromId);
+        query.AddIfNotNull(BinanceConstants.LimitParameterName, (long?)limit);
+
+        var body = await _api
+            .GetSignedAsync(
+                BinanceApiPaths.UserTrades,
+                query,
+                BinanceRequestWeights.UserTrades,
+                UserTradesOperation,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return body.TryGetValue(out var json)
+            ? BinanceResponseReader.ReadUserTrades(json)
+            : body.ToFailure<IReadOnlyList<Trade>>();
     }
 
     /// <summary>

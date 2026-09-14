@@ -208,6 +208,47 @@ public sealed class BinanceTestnetIntegrationTests
 
     [TestMethod]
     [TestCategory("Testnet")]
+    public async Task ReadsTheAccountTradeList()
+    {
+        // 唯讀查詢,不送任何單。驗的是這條路徑真的通(簽章、參數、回應形狀),而不是驗有幾筆成交 ——
+        // 帳戶可能一筆都沒有,而「沒有成交」是成功的空清單,不是失敗。
+        // A read-only query that places nothing. It proves the path works — signing, parameters, response shape
+        // — rather than asserting a count: the account may hold no fills at all, and none is an empty list.
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        var trades = await client.GetUserTradesAsync(Symbol, limit: 10);
+
+        Assert.IsTrue(trades.IsSuccess, trades.Error?.Message);
+
+        foreach (var trade in trades.GetValueOrThrow())
+        {
+            Assert.AreEqual(Symbol, trade.Symbol);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(trade.TradeId), "成交編號是去重的唯一依據,不能是空的。");
+            Assert.AreNotEqual(default, trade.ExecutedAt, "成交時刻是下一次補查的起點,不能是預設值。");
+        }
+    }
+
+    [TestMethod]
+    [TestCategory("Testnet")]
+    public async Task TheAccountTradeListRefusesBothCursorsAtOnce()
+    {
+        // 幣安不接受 startTime 與 fromId 同時出現,而本套件在送出之前就擋下來。
+        // 失敗不帶幣安的錯誤代碼,就是「擋下來的是本地那一關」的證據。
+        // Binance does not accept startTime together with fromId, and this package refuses it locally. A failure
+        // carrying no Binance code is the proof that the local guard is what stopped it.
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        var result = await client.GetUserTradesAsync(Symbol, since: DateTimeOffset.UtcNow.AddHours(-1), fromId: 1L);
+
+        Assert.IsTrue(result.IsFailure);
+        Assert.AreEqual(TradeErrorCodes.InvalidQuery, result.Error!.Code);
+        Assert.IsFalse(result.Error.TryGetInt64(BinanceErrorDataKeys.ApiCode, out _), "這一關應該在本地就擋下來。");
+    }
+
+    [TestMethod]
+    [TestCategory("Testnet")]
     public async Task LocalClockAgreesWithTheExchangeWithinTheRecvWindow()
     {
         // 時鐘偏移的症狀是每一個簽章請求都失敗,而錯誤訊息看起來像簽章問題。

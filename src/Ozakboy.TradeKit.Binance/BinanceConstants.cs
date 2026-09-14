@@ -39,6 +39,24 @@ public static class BinanceConstants
     public const string SymbolParameterName = "symbol";
 
     /// <summary>
+    /// 起點時刻的查詢參數名,值為毫秒 Unix epoch。
+    /// The start-time query parameter, in Unix epoch milliseconds.
+    /// </summary>
+    public const string StartTimeParameterName = "startTime";
+
+    /// <summary>
+    /// 起點編號的查詢參數名,成交紀錄用它接續上一頁。
+    /// The start-id query parameter the trade list uses to continue from the previous page.
+    /// </summary>
+    public const string FromIdParameterName = "fromId";
+
+    /// <summary>
+    /// 筆數上限的查詢參數名。
+    /// The result-count limit query parameter.
+    /// </summary>
+    public const string LimitParameterName = "limit";
+
+    /// <summary>
     /// 註冊在 <c>IHttpClientFactory</c> 的具名用戶端名稱。
     /// The name under which the client is registered with <c>IHttpClientFactory</c>.
     /// </summary>
