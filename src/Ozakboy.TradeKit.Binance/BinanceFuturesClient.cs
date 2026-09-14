@@ -1219,6 +1219,30 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
     /// </remarks>
     private static Error MapConditionalError(Error error)
     {
+        // 先看幣安的原始代碼,再退回中立代碼。原始代碼分得比較細:-2025 是「掛太多」,
+        // 與其他同樣落在 OrderRejected 的原因(保證金不足、部位不夠)語意完全不同,
+        // 而條件單的上限是全帳戶合計 200 張,踩到的時候呼叫端需要知道是這一種。
+        // The raw Binance code is consulted first and the neutral one is the fallback, because the raw code is
+        // finer grained: -2025 means "too many resting orders", which is nothing like the other causes that
+        // also land on OrderRejected such as insufficient margin or position. The conditional ceiling is 200
+        // across the whole account, and a caller that hits it needs to know that is what happened.
+        if (error.TryGetInt64(BinanceErrorDataKeys.ApiCode, out var apiCode))
+        {
+            var byApiCode = (int)apiCode switch
+            {
+                BinanceApiErrorCodes.NoSuchOrder => TradeErrorCodes.ConditionalOrderNotFound,
+                BinanceApiErrorCodes.DuplicatedClientOrderId =>
+                    TradeErrorCodes.DuplicateClientConditionalOrderId,
+                BinanceApiErrorCodes.MaxOpenOrderExceeded => TradeErrorCodes.ConditionalOrderLimitExceeded,
+                _ => null,
+            };
+
+            if (byApiCode is not null)
+            {
+                return WithCode(error, byApiCode);
+            }
+        }
+
         var code = error.Code switch
         {
             TradeErrorCodes.OrderNotFound => TradeErrorCodes.ConditionalOrderNotFound,
@@ -1227,14 +1251,17 @@ public sealed class BinanceFuturesClient : IExchangeClient, IDisposable
             _ => error.Code,
         };
 
-        return string.Equals(code, error.Code, StringComparison.Ordinal)
+        return WithCode(error, code);
+    }
+
+    private static Error WithCode(Error error, string code) =>
+        string.Equals(code, error.Code, StringComparison.Ordinal)
             ? error
             : new Error(code, error.Message, error.Category)
             {
                 Exception = error.Exception,
                 Data = error.Data,
             };
-    }
 
     /// <inheritdoc />
     public void Dispose()

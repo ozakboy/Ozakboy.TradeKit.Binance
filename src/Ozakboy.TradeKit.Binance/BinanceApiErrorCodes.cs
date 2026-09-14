@@ -192,6 +192,15 @@ public static class BinanceApiErrorCodes
     public const int PositionNotSufficient = -2024;
 
     /// <summary>-2025 MAX_OPEN_ORDER_EXCEEDED:已達未成交委託數量上限。Reached the max open order limit.</summary>
+    /// <remarks>
+    /// 條件單也算在這一碼底下,但上限是<b>全帳戶合計 200 張</b>而不是每個商品各 200 張 ——
+    /// 幣安於 2025-12-29 把 <c>MAX_NUM_ALGO_ORDERS</c> 這個 per-symbol 篩選器從 <c>exchangeInfo</c> 拿掉,
+    /// 改成全域上限。多商品同時掛停損停利時,這個數字比想像中容易碰到。
+    /// Conditional orders share this code, but their ceiling is <b>200 across the whole account</b> rather than
+    /// 200 per symbol: Binance removed the per-symbol <c>MAX_NUM_ALGO_ORDERS</c> filter from
+    /// <c>exchangeInfo</c> on 2025-12-29 in favour of a global limit. With stops and take-profits on several
+    /// symbols at once it is easier to reach than it sounds.
+    /// </remarks>
     public const int MaxOpenOrderExceeded = -2025;
 
     /// <summary>-2026 REDUCE_ONLY_ORDER_TYPE_NOT_SUPPORTED:只減倉不支援這個委託類型。This order type is not supported when reduceOnly.</summary>
@@ -253,6 +262,22 @@ public static class BinanceApiErrorCodes
 
     /// <summary>-4068 POSITION_SIDE_CHANGE_EXISTS_QUANTITY:有持倉,無法變更持倉模式。Cannot change position side with an existing position.</summary>
     public const int PositionModeChangeBlockedByPosition = -4068;
+
+    /// <summary>
+    /// -4116 DUPLICATED_CLIENT_ORDER_ID:用戶端訂單編號重複。Duplicated client order id.
+    /// </summary>
+    /// <remarks>
+    /// 這一碼在冪等送單的情境下<b>不是壞消息</b>:它代表那張單先前已經送出去、而且交易所收下了。
+    /// 因此它對映到 <see cref="TradeErrorCodes.DuplicateClientOrderId"/> 而不是籠統的拒單 ——
+    /// 收到它的正確反應是查單確認,不是換一個編號重送。
+    /// 條件單的 <c>clientAlgoId</c> 重複也是這一碼:Algo 端點沒有自己的一組錯誤碼。
+    /// Under idempotent submission this code is <b>not</b> bad news: it means the order was already sent and
+    /// the exchange has it. It therefore maps to <see cref="TradeErrorCodes.DuplicateClientOrderId"/> rather
+    /// than to a generic rejection, because the correct response is to look the order up, not to retry under a
+    /// fresh id. A duplicated conditional <c>clientAlgoId</c> answers the same code: the algo endpoints have no
+    /// codes of their own.
+    /// </remarks>
+    public const int DuplicatedClientOrderId = -4116;
 
     /// <summary>
     /// -4120:這個端點不接受該委託類型,幣安要求改用 Algo Order 專用端點。

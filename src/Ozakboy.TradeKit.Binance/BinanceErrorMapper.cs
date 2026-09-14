@@ -421,6 +421,10 @@ public static class BinanceErrorMapper
         BinanceApiErrorCodes.NoSuchOrder =>
             (TradeErrorCodes.OrderNotFound, ErrorCategory.NotFound, string.Empty),
 
+        BinanceApiErrorCodes.DuplicatedClientOrderId =>
+            (TradeErrorCodes.DuplicateClientOrderId, ErrorCategory.Conflict,
+                "(這個編號的委託先前已經送出並被交易所收下。冪等送單遇到它代表「那張單已經進去了」——正確反應是用同一個編號查單確認,不是換一個編號重送。The order carrying this id was already accepted by the exchange. Under idempotent submission that means it went through: look it up by the same id rather than re-sending under a fresh one.)"),
+
         BinanceApiErrorCodes.BadApiKeyFormat or BinanceApiErrorCodes.ApiKeysLocked =>
             (TradeErrorCodes.InvalidCredentials, ErrorCategory.Unauthorized, string.Empty),
 

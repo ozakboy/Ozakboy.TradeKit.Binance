@@ -542,6 +542,41 @@ public sealed class BinanceConditionalOrderTradingTests
     }
 
     [TestMethod]
+    [DataRow(-2013, TradeErrorCodes.ConditionalOrderNotFound)]
+    [DataRow(-4116, TradeErrorCodes.DuplicateClientConditionalOrderId)]
+    [DataRow(-2025, TradeErrorCodes.ConditionalOrderLimitExceeded)]
+    public async Task EachGenericCodeIsRelabelledForTheConditionalPath(int apiCode, string expected)
+    {
+        // 這三碼在一般委託上有各自的中立代碼,條件單路徑上要換成條件單專屬的那一組。
+        // -2025 特別值得分開:條件單的上限是全帳戶合計 200 張,與「保證金不足」這種同樣落在
+        // OrderRejected 的原因完全不是一回事,而呼叫端對兩者的處置也不同。
+        // The three have their own neutral codes for ordinary orders and need the conditional counterparts
+        // here. -2025 is worth separating in particular: the conditional ceiling is 200 across the whole
+        // account, which is nothing like "insufficient margin" even though both land on OrderRejected, and a
+        // caller responds to them differently.
+        var stub = new StubHttpMessageHandler((_, _) => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(
+                $$"""{"code":{{apiCode}},"msg":"rejected."}""",
+                System.Text.Encoding.UTF8,
+                "application/json"),
+        });
+
+        var (client, _, http) = Create(stub);
+
+        using (http)
+        using (client)
+        {
+            var found = await client.GetConditionalOrderAsync(
+                "BTCUSDT",
+                ConditionalOrderIdentifier.FromClientId("pt-algo-1"));
+
+            Assert.IsTrue(found.IsFailure);
+            Assert.AreEqual(expected, found.Error!.Code);
+        }
+    }
+
+    [TestMethod]
     public async Task AFailedPlacementStillHandsBackTheClientAlgoId()
     {
         var stub = new StubHttpMessageHandler((request, _) =>

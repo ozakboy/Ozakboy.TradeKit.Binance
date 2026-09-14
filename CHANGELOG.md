@@ -63,11 +63,24 @@ supplies the missing path.
 
 - **幣安的 Algo 端點沒有自己的一組錯誤碼**:官方 error-code 頁面上唯一與 algo 有關的只有 `-4120`。
   條件單查不到回的是一般的 `-2013`、編號重複回 `-4116`、掛太多回 `-2025`,與一般委託完全同碼。
-  因此區分在呼叫端做:條件單路徑上的失敗會改標成 `trade.conditional_order_not_found` 等專屬代碼。
-  共用代碼的代價是上層分不出「停損不見了」與「進場單不見了」,而前者代表部位正在裸奔。
+  因此區分在呼叫端做:條件單路徑上的失敗會依原始代碼改標成
+  `trade.conditional_order_not_found`、`trade.duplicate_client_conditional_order_id` 與
+  `trade.conditional_order_limit_exceeded`。共用代碼的代價是上層分不出「停損不見了」與
+  「進場單不見了」,而前者代表部位正在裸奔。
   **The algo endpoints have no error codes of their own**; the only algo-related entry on the official page is
-  `-4120`. Failures on the conditional path are therefore re-labelled at the call site, because sharing the
-  codes leaves callers unable to tell "the stop is gone" from "the entry is gone".
+  `-4120`. Failures on the conditional path are therefore re-labelled at the call site from the raw code,
+  because sharing them leaves callers unable to tell "the stop is gone" from "the entry is gone".
+- **`-4116 DUPLICATED_CLIENT_ORDER_ID` 先前完全沒有對映**,一律落到
+  `trade.unknown_exchange_error`。這一碼在冪等送單下**不是壞消息**:它代表那張單已經進去了,
+  正確反應是用同一個編號查單,不是換一個編號重送。現在對映到
+  `trade.duplicate_client_order_id`,一般委託與條件單兩條路徑都受益。
+  **`-4116 DUPLICATED_CLIENT_ORDER_ID` had no mapping at all** and fell through to
+  `trade.unknown_exchange_error`. Under idempotent submission it is **not** bad news — it means the order got
+  through, and the answer is to look it up rather than retry under a fresh id. Both paths benefit.
+- `-2025 MAX_OPEN_ORDER_EXCEEDED` 的說明補上條件單的差異:上限是**全帳戶合計 200 張**,
+  不是每個商品各 200 張(幣安於 2025-12-29 移除 `exchangeInfo` 的 `MAX_NUM_ALGO_ORDERS` per-symbol 篩選器)。
+  The note on `-2025` now records that a conditional order's ceiling is **200 across the whole account** rather
+  than per symbol, after Binance removed the per-symbol `MAX_NUM_ALGO_ORDERS` filter on 2025-12-29.
 - **撤銷單張條件單會打兩次網路**:`DELETE` 的回應只有 `{algoId, clientAlgoId, code, msg}`,
   沒有方向、沒有類型、沒有觸發價,湊不出一個誠實的 `ConditionalOrder`;因此撤完再查一次。
   多一次權重 1 的查詢,換的是不必在回傳值裡填 `Unspecified`。
