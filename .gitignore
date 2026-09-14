@@ -37,6 +37,7 @@ desktop.ini
 *.pfx
 *.key
 
-# 暫時性:Ozakboy.Http 0.3.3 發佈前,還原目的地由 NuGet.config 指到這裡,連同該檔一起刪除。
-# TEMPORARY: restore target while Ozakboy.Http 0.3.3 is unpublished; remove along with NuGet.config.
+# 相依套件尚未發佈、暫時以本機 feed 還原時,NuGet.config 會把還原目的地指到這裡;留著忽略規則,免得殘留目錄進版控。
+# When a dependency is not yet published and a temporary NuGet.config restores from the local feed, it points the
+# restore target here; the rule stays so a leftover folder never lands in version control.
 /.nuget-packages/
