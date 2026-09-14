@@ -8,6 +8,69 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-09-14
+
+**升上 `Ozakboy.Http` 0.3.3:自己關掉簽章組公開行情用戶端時,查詢參數不再消失。**
+**Moves to `Ozakboy.Http` 0.3.3: a public market data client assembled with signing switched off no longer loses
+its query parameters.**
+
+本套件自己的程式碼沒有改動,公開 API 不變。受影響的是「不走 `AddBinanceFutures`、自己以 `AddOzakboyHttpPipeline`
+關掉簽章組 REST 用戶端,再交給 `BinanceMarketDataFeed`」的呼叫端 —— 例如同一個行程裡帳戶走 Testnet、行情另外接
+主網公開端點、刻意不帶憑證的混接組法。
+No code in this package changed and the public API is the same. Affected are callers that bypass
+`AddBinanceFutures`, build a REST client through `AddOzakboyHttpPipeline` with signing switched off, and hand it
+to `BinanceMarketDataFeed` — the mixed setup where the account runs on the testnet while market data comes from
+production public endpoints, credential-free on purpose.
+
+### 問題修正 / Fixed
+
+- **簽章關閉的管線查 K 線回 `-1102` / An unsigned pipeline's kline query came back `-1102`**:
+  `Ozakboy.Http` 0.3.2 以前,把 `WithQueryParameters` 的參數寫進位址的只有簽章處理器,而 `EnableSigning = false`
+  時它根本不掛。`GetKlinesAsync` 的 `symbol`、`interval`、`limit` 因此一個都沒送出,幣安回
+  `-1102 Mandatory parameter 'symbol' was not sent`,下游的回測下載器實跑重現。0.3.3 在簽章關閉時改掛一個只寫參數、
+  不簽章的內部處理器,寫入規則與簽章路徑共用同一份。
+  Before `Ozakboy.Http` 0.3.3 only the signing handler wrote `WithQueryParameters` into the URI, and with
+  `EnableSigning = false` it is not attached. `GetKlinesAsync` therefore sent none of `symbol`, `interval` or
+  `limit`, and Binance answered `-1102 Mandatory parameter 'symbol' was not sent`, as a downstream backtest
+  downloader reproduced live. 0.3.3 attaches an internal handler that writes the parameters without signing when
+  signing is off, sharing the signing path's write rule.
+
+### 技術改進 / Changed
+
+- **`MainnetPublic` 為什麼先前沒抓到 / Why `MainnetPublic` missed it**:原本唯一的一條只測 WebSocket 串流、完全不走
+  REST;而本套件自己的兩種組法 —— `AddBinanceFutures`(一律 `EnableSigning = true`)與單元測試用的手組
+  `TestPipeline`(一律掛著 `SigningHandler`)—— 都帶簽章處理器,它對沒有標記簽章的公開請求也照樣寫入參數,
+  所以沒有任何一條測試走得到「簽章處理器不存在」的那條路徑。
+  The only test in that category covered the WebSocket stream and never touched REST, and both of this package's
+  own assemblies — `AddBinanceFutures`, always `EnableSigning = true`, and the hand-built `TestPipeline` used by the
+  unit tests, which always includes `SigningHandler` — carry a signing handler that writes parameters for unsigned
+  public requests as well, so no test ever travelled the path where that handler is absent.
+- **補上兩條測試鎖住它 / Two tests now pin it**:
+  `BinanceMarketDataMainnetPublicTests.FetchesKlinesOverRestThroughACredentialFreeUnsignedPipeline`
+  (`MainnetPublic`,以不帶憑證、簽章關閉的管線實際查主網 `BTCUSDT` 1m 五根)與離線的
+  `BinanceUnsignedPublicPipelineTests.AKlineQueryThroughTheUnsignedPipelineSendsEveryParameterInOrder`
+  (假傳輸,斷言 `symbol`、`interval`、`limit` 依序送出、不帶簽章與金鑰標頭)。兩條共用
+  `TestSupport/UnsignedPublicPipeline`,組法照下游混接的寫法。**先在 `Ozakboy.Http` 0.3.2 下實跑:兩條皆紅**
+  (主網回 `-1102`;離線那條送出的 query 為空字串);升上 0.3.3 後皆綠。
+  A `MainnetPublic` test that really fetches five 1m `BTCUSDT` candles from production through a credential-free,
+  signing-off pipeline, and an offline test asserting that `symbol`, `interval` and `limit` go out in order with no
+  signature or key header. Both share `TestSupport/UnsignedPublicPipeline`, assembled the way the downstream mixed
+  setup is. **Run first on `Ozakboy.Http` 0.3.2, both were red** (production answered `-1102`; the offline test
+  saw an empty query); on 0.3.3 both are green.
+- **暫時的 `NuGet.config` / A temporary `NuGet.config`**:`Ozakboy.Http` 0.3.3 尚未發佈,暫以本機 feed 還原,
+  還原目的地放在 repo 底下的 `.nuget-packages`;0.3.3 上 nuget.org 後連同 `.gitignore` 那一行一起刪除。
+  `Ozakboy.Http` 0.3.3 is not published yet, so restore uses the local feed with a repo-local packages folder;
+  both go once 0.3.3 is on nuget.org.
+
+### 備註 / Notes
+
+- 單元測試 860 條全綠(0.2.0 的 859 條加 1 條);`MainnetPublic` 2 條全綠;帶 Testnet 憑證跑
+  `TestCategory!=MainnetPublic` 共 887 條全綠(860 條單元測試加 27 條 Testnet 整合測試)。
+  860 unit tests green (859 from 0.2.0 plus 1); both `MainnetPublic` tests green; with Testnet credentials,
+  `TestCategory!=MainnetPublic` runs 887 tests, all green (the 860 unit tests plus 27 Testnet integration tests).
+- 相依樹仍只有 `Microsoft.*`、`System.*` 與 `Ozakboy.*`。
+  The dependency graph still contains only `Microsoft.*`, `System.*` and `Ozakboy.*`.
+
 ## [0.2.0] - 2026-09-14
 
 **條件單改走 Algo Order;`PlaceOrderAsync` 送條件單型別會被交易所拒絕。**
