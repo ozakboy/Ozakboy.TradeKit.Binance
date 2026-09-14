@@ -63,6 +63,36 @@ internal static class BinanceUserDataPaths
     /// <summary>帳戶餘額與部位的增量事件。The balance and position delta event.</summary>
     public const string AccountUpdateEvent = "ACCOUNT_UPDATE";
 
+    /// <summary>
+    /// 條件單狀態變化事件。The conditional order state change event.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 幣安 2025-12-09 把條件單移到 Algo Service 之後新增的事件。條件單的狀態變化<b>只</b>出現在這裡,
+    /// <b>不會</b>出現在 <see cref="OrderTradeUpdateEvent"/> —— 只訂閱委託更新的話,「停損被觸發了」
+    /// 這件事會整個消失。
+    /// Added when Binance moved conditional orders to the Algo Service on 2025-12-09. Conditional order state
+    /// changes appear <b>only</b> here and <b>never</b> on <see cref="OrderTradeUpdateEvent"/>: subscribing
+    /// only to order updates loses the fact that a stop triggered at all.
+    /// </para>
+    /// <para>
+    /// 出處:官方 change-log 2025-11-06「Websocket User Stream Update — New algo order event:
+    /// <c>ALGO_UPDATE</c>」(<c>https://developers.binance.com/docs/derivatives/change-log</c>);
+    /// 欄位結構見
+    /// <c>https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/user-data-streams</c>。
+    /// 兩者擷取日期 2026-09-14。
+    /// Sources: the official change-log of 2025-11-06 and the user-data-streams page for the field layout, both
+    /// retrieved 2026-09-14.
+    /// </para>
+    /// <para>
+    /// 同一個事件名在統一帳戶(Portfolio Margin)那一側的巢狀物件是 <c>ao</c>,USDⓈ-M 這一側是 <c>o</c>。
+    /// 抄錯那一個字母的結果是每一則條件單事件都判失敗。
+    /// The same event name nests its payload under <c>ao</c> on Portfolio Margin and under <c>o</c> here on
+    /// USDⓈ-M. Copying the wrong letter fails every conditional order event.
+    /// </para>
+    /// </remarks>
+    public const string AlgoUpdateEvent = "ALGO_UPDATE";
+
     /// <summary>保證金追繳警告事件。The margin call event.</summary>
     public const string MarginCallEvent = "MARGIN_CALL";
 
@@ -107,6 +137,7 @@ internal static class BinanceUserDataPaths
     public static readonly IReadOnlyList<string> StreamEvents =
     [
         OrderTradeUpdateEvent,
+        AlgoUpdateEvent,
         AccountUpdateEvent,
         MarginCallEvent,
         ListenKeyExpiredEvent,

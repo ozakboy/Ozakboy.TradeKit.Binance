@@ -143,6 +143,13 @@ public sealed class BinanceUserDataTestnetTests
 
             var orders = feed.SubscribeOrderUpdatesAsync(cts.Token).GetAsyncEnumerator(cts.Token);
 
+            // 條件單走的是另一個事件(ALGO_UPDATE),所以要另外訂一條 —— 委託串流收不到它。
+            // 這一條同樣必須在任何條件單送出之前就登記完成,理由與委託串流相同:訂閱之前的事件不補送。
+            // Conditional orders travel on a different event (ALGO_UPDATE) and need their own subscription;
+            // the order stream never sees them. It must likewise be registered before any conditional order
+            // goes out, for the same reason: nothing earlier is replayed.
+            var conditionals = feed.SubscribeConditionalOrderUpdatesAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
             // 三個動作的順序都是必要的,少一個就會等一則永遠不會來的事件。
             //
             // 一、MoveNextAsync 觸發列舉開始,訂閱者在它的同步階段就登記完成 —— 訂閱之前發生的事件
@@ -161,6 +168,7 @@ public sealed class BinanceUserDataTestnetTests
             // resting on the book while the stream stays silent for two minutes" — indistinguishable from an
             // exchange outage, and reproducible on demand by toggling this one wait.
             var firstEvent = orders.MoveNextAsync();
+            var firstConditionalEvent = conditionals.MoveNextAsync();
 
             var ready = await feed.StartAsync(cts.Token);
 
@@ -168,6 +176,13 @@ public sealed class BinanceUserDataTestnetTests
 
             var (price, quantity) = await BuildRestingOrderAsync(client);
             var clientOrderId = NewClientOrderId("uds");
+
+            // 條件單用同一個價位當觸發價:它在標記價下方約 4%,是「掛得上、又絕不會觸發」的位置。
+            // 賣方向的停損觸發價必須低於現價,否則交易所會以 -2021「會立刻觸發」拒單。
+            // The conditional order triggers at the same price, about 4% below the mark, which both passes the
+            // filter and cannot fire. A sell stop's trigger has to sit below the current price, or the
+            // exchange refuses it with -2021, "order would immediately trigger".
+            var clientAlgoId = NewClientOrderId("alg");
 
             var placed = await client.PlaceOrderAsync(
                 new OrderRequest
@@ -207,9 +222,81 @@ public sealed class BinanceUserDataTestnetTests
 
                 Assert.AreEqual(OrderStatus.Canceled, cancelEvent.Status);
                 Assert.AreEqual(accepted.ExchangeOrderId, cancelEvent.ExchangeOrderId);
+
+                // ── 條件單走同一條連線的另一個事件 / The conditional order on the same connection ──
+                //
+                // 沿用同一條串流,理由與整個測試合併成一條的理由相同:整個帳戶只有一把 listenKey。
+                // 這一段證明的是 ALGO_UPDATE 真的推得出來 —— 單元測試的樣本是照文件組的,
+                // 只證明得了「對映有照文件寫」,證明不了「文件說的就是交易所送的」。
+                // The same stream is reused for the same reason the whole test is one method: the account
+                // holds a single listenKey. This half proves that ALGO_UPDATE is actually pushed. The unit
+                // test samples are built from the documentation and can only show that the mapping follows it,
+                // never that the documentation matches what the exchange sends.
+                var conditionalPlaced = await client.PlaceConditionalOrderAsync(
+                    new ConditionalOrderRequest
+                    {
+                        Symbol = Symbol,
+                        Side = OrderSide.Sell,
+                        ConditionalOrderType = ConditionalOrderType.StopMarket,
+                        Quantity = quantity,
+                        TriggerPrice = price,
+                        TriggerPriceType = TriggerPriceType.MarkPrice,
+                        ClientConditionalOrderId = clientAlgoId,
+                    },
+                    cts.Token);
+
+                Assert.IsTrue(conditionalPlaced.IsSuccess, conditionalPlaced.Error?.Message);
+
+                var conditionalAccepted = await AwaitConditionalOrderAsync(
+                    conditionals,
+                    firstConditionalEvent,
+                    clientAlgoId,
+                    ConditionalOrderStatus.New,
+                    client,
+                    cts);
+
+                Assert.AreEqual(Symbol, conditionalAccepted.ConditionalOrder.Symbol);
+                Assert.AreEqual(OrderSide.Sell, conditionalAccepted.ConditionalOrder.Side);
+                Assert.AreEqual(
+                    ConditionalOrderType.StopMarket,
+                    conditionalAccepted.ConditionalOrder.ConditionalOrderType);
+                Assert.AreEqual(price, conditionalAccepted.ConditionalOrder.TriggerPrice);
+                Assert.IsNull(
+                    conditionalAccepted.ConditionalOrder.TriggeredOrderId,
+                    "這張條件單觸發了 —— 觸發價離標記價不夠遠。");
+
+                var conditionalCancelled = await client.CancelConditionalOrderAsync(
+                    Symbol,
+                    ConditionalOrderIdentifier.FromClientId(clientAlgoId),
+                    cts.Token);
+
+                Assert.IsTrue(conditionalCancelled.IsSuccess, conditionalCancelled.Error?.Message);
+
+                var conditionalCancelEvent = await AwaitConditionalOrderAsync(
+                    conditionals,
+                    null,
+                    clientAlgoId,
+                    ConditionalOrderStatus.Canceled,
+                    client,
+                    cts);
+
+                Assert.AreEqual(
+                    conditionalAccepted.ConditionalOrder.ExchangeConditionalOrderId,
+                    conditionalCancelEvent.ConditionalOrder.ExchangeConditionalOrderId);
             }
             finally
             {
+                // 條件單也要撤,而且是撤在委託那一張之前 —— 條件單留著比一般掛單危險:
+                // 它會在某個價位真的動用部位。
+                // The conditional order is cancelled too, and before the ordinary one: a stray conditional
+                // order is the more dangerous of the two, because it will really move the position at some
+                // price.
+                _ = await client.CancelConditionalOrderAsync(
+                    Symbol,
+                    ConditionalOrderIdentifier.FromClientId(clientAlgoId));
+
+                await conditionals.DisposeAsync();
+
                 // 斷言失敗也要撤。留下孤兒單會污染後續測試,而且在 Testnet 上會一直掛著。
                 // Cancelled even when an assertion fails: a stray order pollutes every later test and rests on
                 // the testnet indefinitely.
@@ -349,6 +436,89 @@ public sealed class BinanceUserDataTestnetTests
             $"等了 {EventTimeout} 仍未在串流上看到委託「{clientOrderId}」進入 {expected};"
             + $"以 REST 查詢,這張單目前{(resting ? "還掛在簿上" : "不在掛單清單裡")},"
             + "所以問題出在串流推送這一側而不是下單那一側。");
+
+        throw new InvalidOperationException("unreachable");
+    }
+
+    /// <summary>
+    /// 等到指定的條件單出現在串流上、且狀態符合為止。
+    /// Waits for the named conditional order to appear on the stream with the expected status.
+    /// </summary>
+    /// <param name="conditionals">條件單串流的列舉器。The conditional order stream's enumerator.</param>
+    /// <param name="pending">
+    /// 已經發動但還沒等到的第一次推進;沒有時傳 <see langword="null"/>。
+    /// A first advance already issued but not yet awaited, or <see langword="null"/>.
+    /// </param>
+    /// <param name="clientAlgoId">要等的條件單編號。The client algo id to wait for.</param>
+    /// <param name="expected">要等的狀態。The status to wait for.</param>
+    /// <param name="client">交易用戶端,失敗時用來查這張單到底在不在。The trading client, used on failure.</param>
+    /// <param name="watchdog">列舉器的取消來源,兼作等待的看門狗。The enumerator's cancellation source.</param>
+    /// <returns>符合條件的更新。The matching update.</returns>
+    /// <remarks>
+    /// 結構刻意與 <see cref="AwaitOrderAsync"/> 一致,包含每一次推進都等到完成才離開 ——
+    /// 推進還在進行中就 <c>DisposeAsync</c> 會擲 <c>NotSupportedException</c>,而那個例外會把
+    /// 「等不到事件」蓋成一個莫名其妙的不支援錯誤。
+    /// The shape deliberately matches <see cref="AwaitOrderAsync"/>, including awaiting every advance to
+    /// completion: disposing mid-advance throws <c>NotSupportedException</c>, which turns "no event arrived"
+    /// into an inexplicable unsupported operation.
+    /// </remarks>
+    private static async Task<ConditionalOrderUpdate> AwaitConditionalOrderAsync(
+        IAsyncEnumerator<Result<ConditionalOrderUpdate>> conditionals,
+        ValueTask<bool>? pending,
+        string clientAlgoId,
+        ConditionalOrderStatus expected,
+        BinanceFuturesClient client,
+        CancellationTokenSource watchdog)
+    {
+        var advance = pending;
+
+        watchdog.CancelAfter(EventTimeout);
+
+        while (true)
+        {
+            var moved = advance ?? conditionals.MoveNextAsync();
+
+            advance = null;
+
+            if (!await moved)
+            {
+                break;
+            }
+
+            var item = conditionals.Current;
+
+            if (!item.TryGetValue(out var update))
+            {
+                Assert.IsTrue(item.Error!.IsTransient, item.Error!.Message);
+
+                continue;
+            }
+
+            if (string.Equals(
+                    update.ConditionalOrder.ClientConditionalOrderId,
+                    clientAlgoId,
+                    StringComparison.Ordinal)
+                && update.ConditionalOrder.Status == expected)
+            {
+                watchdog.CancelAfter(Timeout.InfiniteTimeSpan);
+
+                return update;
+            }
+        }
+
+        var open = await client.GetOpenConditionalOrdersAsync(Symbol);
+        var resting = open.TryGetValue(out var orderList)
+            && orderList.Any(candidate => string.Equals(
+                candidate.ClientConditionalOrderId,
+                clientAlgoId,
+                StringComparison.Ordinal));
+
+        Assert.Fail(
+            $"等了 {EventTimeout} 仍未在串流上看到條件單「{clientAlgoId}」進入 {expected};"
+            + $"以 REST 查詢,這張條件單目前{(resting ? "還掛著" : "不在未結清單裡")},"
+            + "所以問題出在串流推送這一側而不是送單那一側。"
+            + "另一個可能是 ALGO_UPDATE 沒有列進撥號時的 events 過濾器 —— "
+            + "那會讓這一類事件永遠不來,而連線與其他事件完全正常。");
 
         throw new InvalidOperationException("unreachable");
     }

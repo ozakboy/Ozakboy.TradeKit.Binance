@@ -299,6 +299,7 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     private enum UserDataChannel
     {
         Orders,
+        ConditionalOrders,
         Trades,
         AccountUpdates,
         MarginCalls,
@@ -379,6 +380,35 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
     public IAsyncEnumerable<Result<Order>> SubscribeOrderUpdatesAsync(
         CancellationToken cancellationToken = default) =>
         SubscribeCoreAsync<Order>(UserDataChannel.Orders, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// 這條串流的來源是 <c>ALGO_UPDATE</c>,與委託更新的 <c>ORDER_TRADE_UPDATE</c> 是<b>兩個不同的事件</b>。
+    /// 條件單的狀態變化不會出現在 <see cref="SubscribeOrderUpdatesAsync"/>,反之亦然 ——
+    /// 只訂閱委託更新的話,「停損被觸發了」這件事會整個消失,看得到的只有觸發之後生出的那張委託成交。
+    /// This stream carries <c>ALGO_UPDATE</c>, a <b>different event</b> from the <c>ORDER_TRADE_UPDATE</c>
+    /// behind order updates. Conditional order state changes never appear on
+    /// <see cref="SubscribeOrderUpdatesAsync"/> and vice versa: subscribing only to order updates loses the
+    /// fact that a stop triggered at all, leaving just the fill of the order the trigger produced.
+    /// </para>
+    /// <para>
+    /// 兩者要接回去,靠的是 <see cref="ConditionalOrder.TriggeredOrderId"/> —— 它就是委託串流上那張單的
+    /// <see cref="Order.ExchangeOrderId"/>。
+    /// The link between them is <see cref="ConditionalOrder.TriggeredOrderId"/>, which is the
+    /// <see cref="Order.ExchangeOrderId"/> of the order on the other stream.
+    /// </para>
+    /// <para>
+    /// <b>移動停損在觸發前會送兩則狀態為 <see cref="ConditionalOrderStatus.New"/> 的事件</b>
+    /// (啟動前一則、啟動後一則)。這不是重送,消費端若要去重,鍵不可以只有「條件單編號 + 狀態」。
+    /// <b>A trailing stop sends two events with status <see cref="ConditionalOrderStatus.New"/></b> before it
+    /// triggers, one before activation and one after. That is not a duplicate, and a consumer that
+    /// de-duplicates must not key on the conditional order id and status alone.
+    /// </para>
+    /// </remarks>
+    public IAsyncEnumerable<Result<ConditionalOrderUpdate>> SubscribeConditionalOrderUpdatesAsync(
+        CancellationToken cancellationToken = default) =>
+        SubscribeCoreAsync<ConditionalOrderUpdate>(UserDataChannel.ConditionalOrders, cancellationToken);
 
     /// <inheritdoc />
     /// <remarks>
@@ -895,6 +925,19 @@ public sealed class BinanceUserDataFeed : IUserDataFeed, IAsyncDisposable
                 if (evt.Fill is { } fill)
                 {
                     Publish(UserDataChannel.Trades, fill);
+                }
+
+                return false;
+
+            case BinanceUserDataEventKind.AlgoUpdate:
+                // 條件單事件只餵這一條。它不會同時產生委託更新 —— 觸發之後那張實際委託會由交易所
+                // 另外推一則 ORDER_TRADE_UPDATE,兩者靠 TriggeredOrderId 接起來,不在這裡合併。
+                // A conditional order event feeds this stream alone. It produces no order update: once
+                // triggered, the real order arrives as its own ORDER_TRADE_UPDATE, and the two are joined
+                // through TriggeredOrderId rather than merged here.
+                if (evt.ConditionalOrderUpdate is { } conditionalOrderUpdate)
+                {
+                    Publish(UserDataChannel.ConditionalOrders, conditionalOrderUpdate);
                 }
 
                 return false;

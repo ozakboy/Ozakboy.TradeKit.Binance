@@ -46,6 +46,12 @@ internal enum BinanceUserDataEventKind
     /// The stream credential expired; this connection will deliver nothing further.
     /// </summary>
     ListenKeyExpired = 4,
+
+    /// <summary>
+    /// 條件單的狀態變化。
+    /// A conditional order state change.
+    /// </summary>
+    AlgoUpdate = 5,
 }
 
 /// <summary>
@@ -75,6 +81,7 @@ internal readonly record struct BinanceUserDataEvent
         Trade? fill,
         AccountUpdate? account,
         MarginCall? marginWarning,
+        ConditionalOrderUpdate? conditionalOrderUpdate,
         DateTimeOffset eventTime)
     {
         Kind = kind;
@@ -82,6 +89,7 @@ internal readonly record struct BinanceUserDataEvent
         Fill = fill;
         Account = account;
         MarginWarning = marginWarning;
+        ConditionalOrderUpdate = conditionalOrderUpdate;
         EventTime = eventTime;
     }
 
@@ -116,6 +124,12 @@ internal readonly record struct BinanceUserDataEvent
     public MarginCall? MarginWarning { get; }
 
     /// <summary>
+    /// 條件單狀態變化,僅在 <see cref="BinanceUserDataEventKind.AlgoUpdate"/> 時有值。
+    /// The conditional order state change, set only for <see cref="BinanceUserDataEventKind.AlgoUpdate"/>.
+    /// </summary>
+    public ConditionalOrderUpdate? ConditionalOrderUpdate { get; }
+
+    /// <summary>
     /// 交易所標在這則訊息上的事件時間(UTC 語意)。
     /// The event time the exchange stamped on the frame, in UTC semantics.
     /// </summary>
@@ -136,7 +150,7 @@ internal readonly record struct BinanceUserDataEvent
     /// <param name="eventTime">事件時間。The event time.</param>
     /// <returns>判讀結果。The outcome.</returns>
     public static BinanceUserDataEvent FromOrder(Order orderUpdate, Trade? fill, DateTimeOffset eventTime) =>
-        new(BinanceUserDataEventKind.OrderTradeUpdate, orderUpdate, fill, null, null, eventTime);
+        new(BinanceUserDataEventKind.OrderTradeUpdate, orderUpdate, fill, null, null, null, eventTime);
 
     /// <summary>
     /// 建立「帳戶增量」的結果。
@@ -146,7 +160,7 @@ internal readonly record struct BinanceUserDataEvent
     /// <param name="eventTime">事件時間。The event time.</param>
     /// <returns>判讀結果。The outcome.</returns>
     public static BinanceUserDataEvent FromAccount(AccountUpdate account, DateTimeOffset eventTime) =>
-        new(BinanceUserDataEventKind.AccountUpdate, null, null, account, null, eventTime);
+        new(BinanceUserDataEventKind.AccountUpdate, null, null, account, null, null, eventTime);
 
     /// <summary>
     /// 建立「保證金追繳」的結果。
@@ -156,7 +170,19 @@ internal readonly record struct BinanceUserDataEvent
     /// <param name="eventTime">事件時間。The event time.</param>
     /// <returns>判讀結果。The outcome.</returns>
     public static BinanceUserDataEvent FromMarginCall(MarginCall marginWarning, DateTimeOffset eventTime) =>
-        new(BinanceUserDataEventKind.MarginCall, null, null, null, marginWarning, eventTime);
+        new(BinanceUserDataEventKind.MarginCall, null, null, null, marginWarning, null, eventTime);
+
+    /// <summary>
+    /// 建立「條件單狀態變化」的結果。
+    /// Creates a conditional-order-update outcome.
+    /// </summary>
+    /// <param name="conditionalOrderUpdate">條件單狀態變化。The conditional order state change.</param>
+    /// <param name="eventTime">事件時間。The event time.</param>
+    /// <returns>判讀結果。The outcome.</returns>
+    public static BinanceUserDataEvent FromConditionalOrder(
+        ConditionalOrderUpdate conditionalOrderUpdate,
+        DateTimeOffset eventTime) =>
+        new(BinanceUserDataEventKind.AlgoUpdate, null, null, null, null, conditionalOrderUpdate, eventTime);
 
     /// <summary>
     /// 建立「憑證已失效」的結果。
@@ -165,7 +191,7 @@ internal readonly record struct BinanceUserDataEvent
     /// <param name="eventTime">事件時間,也就是憑證失效的時刻。The event time, which is when the credential lapsed.</param>
     /// <returns>判讀結果。The outcome.</returns>
     public static BinanceUserDataEvent FromListenKeyExpired(DateTimeOffset eventTime) =>
-        new(BinanceUserDataEventKind.ListenKeyExpired, null, null, null, null, eventTime);
+        new(BinanceUserDataEventKind.ListenKeyExpired, null, null, null, null, null, eventTime);
 
     /// <summary>
     /// 建立「這則訊息不必交給訂閱者」的結果。
@@ -174,7 +200,7 @@ internal readonly record struct BinanceUserDataEvent
     /// <param name="eventTime">事件時間。The event time.</param>
     /// <returns>判讀結果。The outcome.</returns>
     public static BinanceUserDataEvent FromUnknown(DateTimeOffset eventTime) =>
-        new(BinanceUserDataEventKind.Ignored, null, null, null, null, eventTime);
+        new(BinanceUserDataEventKind.Ignored, null, null, null, null, null, eventTime);
 
     /// <summary>
     /// 建立「這是控制指令的回應,不必交給訂閱者」的結果。
@@ -191,5 +217,5 @@ internal readonly record struct BinanceUserDataEvent
     /// reads it on an <see cref="BinanceUserDataEventKind.Ignored"/> outcome.
     /// </remarks>
     public static BinanceUserDataEvent FromCommandReply() =>
-        new(BinanceUserDataEventKind.Ignored, null, null, null, null, default);
+        new(BinanceUserDataEventKind.Ignored, null, null, null, null, null, default);
 }

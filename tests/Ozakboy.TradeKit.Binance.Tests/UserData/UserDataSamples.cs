@@ -55,6 +55,52 @@ internal static class UserDataSamples
     public const string OrderTriggeredStop =
         """{"e":"ORDER_TRADE_UPDATE","T":1789117382500,"E":1789117382505,"o":{"s":"BTCUSDT","c":"pulsetrade-uds-2","S":"SELL","o":"MARKET","f":"GTC","q":"0.001","p":"0","ap":"0","sp":"73000.00","x":"NEW","X":"NEW","i":8886900,"l":"0","z":"0","L":"0","n":"0","N":"USDT","T":1789117382500,"t":0,"b":"0","a":"73.00","m":false,"R":true,"wt":"MARK_PRICE","ot":"STOP_MARKET","ps":"BOTH","cp":false,"rp":"0","pP":false,"si":0,"ss":0}}""";
 
+    /// <summary>
+    /// 條件單掛上去、還在等觸發。A conditional order resting and waiting for its trigger.
+    /// </summary>
+    /// <remarks>
+    /// 欄位取自官方 USDⓈ-M Futures User Data Streams 文件的 <c>algoUpdate</c> schema(擷取日期 2026-09-14)。
+    /// 注意外層的 <c>o</c> 是物件,內層還有一個 <c>o</c> 是委託類型字串 —— 同名不同層,
+    /// 而這正是最容易讀錯的一處。
+    /// The fields come from the <c>algoUpdate</c> schema of the official USDⓈ-M Futures User Data Streams
+    /// documentation, retrieved 2026-09-14. Note that the outer <c>o</c> is an object and the inner <c>o</c> is
+    /// the order type string: the same name on two levels, and the easiest thing here to read wrong.
+    /// </remarks>
+    public const string AlgoNew =
+        """{"e":"ALGO_UPDATE","T":1789117383000,"E":1789117383005,"o":{"caid":"pulsetrade-algo-1","aid":2148719,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.002","X":"NEW","ai":"","ap":"0.00000","aq":"0.00000","act":"0","tp":"37000.0","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":true,"tt":0,"gtd":0,"rm":"","ia":false}}""";
+
+    /// <summary>
+    /// 同一張條件單被撤掉。The same conditional order, cancelled.
+    /// </summary>
+    public const string AlgoCanceled =
+        """{"e":"ALGO_UPDATE","T":1789117384000,"E":1789117384005,"o":{"caid":"pulsetrade-algo-1","aid":2148719,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.002","X":"CANCELED","ai":"","ap":"0.00000","aq":"0.00000","act":"0","tp":"37000.0","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":true,"tt":0,"gtd":0,"rm":"","ia":false}}""";
+
+    /// <summary>
+    /// 條件單已觸發,撮合引擎裡生出了一張實際委託。
+    /// A conditional order that triggered, producing a real order in the matching engine.
+    /// </summary>
+    public const string AlgoTriggered =
+        """{"e":"ALGO_UPDATE","T":1789117385000,"E":1789117385005,"o":{"caid":"pulsetrade-algo-1","aid":2148719,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.002","X":"TRIGGERED","ai":"8886900","ap":"36999.50","aq":"0.002","act":"MARKET","tp":"37000.0","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":true,"tt":1789117385000,"gtd":0,"rm":"","ia":false}}""";
+
+    /// <summary>
+    /// 條件單觸發時被撮合引擎拒絕,原因寫在 <c>rm</c>。
+    /// A conditional order the matching engine refused at the trigger, with the reason in <c>rm</c>.
+    /// </summary>
+    /// <remarks>
+    /// 這是條件單最危險的結局:上層以為部位有停損護著,實際上那張單從來沒有進到簿上。
+    /// 原因只在這則事件裡出現一次。
+    /// This is the dangerous outcome: the caller believes the position is protected while the order never
+    /// reached the book. The reason appears exactly once, in this event.
+    /// </remarks>
+    public const string AlgoRejected =
+        """{"e":"ALGO_UPDATE","T":1789117386000,"E":1789117386005,"o":{"caid":"pulsetrade-algo-2","aid":2148720,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.002","X":"REJECTED","ai":"","ap":"0.00000","aq":"0.00000","act":"0","tp":"37000.0","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":true,"tt":0,"gtd":0,"rm":"Reduce Only reject","ia":false}}""";
+
+    /// <summary>
+    /// 狀態對不上任何已知值的條件單事件。A conditional order event whose status maps to nothing known.
+    /// </summary>
+    public const string AlgoUnknownStatus =
+        """{"e":"ALGO_UPDATE","T":1789117387000,"E":1789117387005,"o":{"caid":"pulsetrade-algo-3","aid":2148721,"at":"CONDITIONAL","o":"STOP_MARKET","s":"BTCUSDT","S":"SELL","ps":"BOTH","f":"GTC","q":"0.002","X":"NOT_A_REAL_STATUS","ai":"","ap":"0.00000","aq":"0.00000","act":"0","tp":"37000.0","p":"0","V":"EXPIRE_MAKER","wt":"MARK_PRICE","pm":"NONE","cp":false,"pP":false,"R":true,"tt":0,"gtd":0,"rm":"","ia":false}}""";
+
     /// <summary>狀態對不上任何已知值的委託更新。An order update whose status maps to nothing known.</summary>
     public const string OrderUnknownStatus =
         """{"e":"ORDER_TRADE_UPDATE","T":1789117382600,"E":1789117382605,"o":{"s":"BTCUSDT","c":"pulsetrade-uds-3","S":"BUY","o":"LIMIT","f":"GTC","q":"0.001","p":"74000.00","ap":"0","sp":"0","x":"NEW","X":"NOT_A_REAL_STATUS","i":8886901,"l":"0","z":"0","L":"0","n":"0","N":"USDT","T":1789117382600,"t":0,"b":"74.00","a":"0","m":false,"R":false,"wt":"CONTRACT_PRICE","ot":"LIMIT","ps":"BOTH","cp":false,"rp":"0","pP":false,"si":0,"ss":0}}""";

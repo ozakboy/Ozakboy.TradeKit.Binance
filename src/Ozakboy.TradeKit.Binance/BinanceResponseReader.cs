@@ -267,6 +267,141 @@ public static class BinanceResponseReader
     }
 
     /// <summary>
+    /// 解析單張條件單的回應(<c>POST</c> 與 <c>GET</c> <c>/fapi/v1/algoOrder</c>)。
+    /// Parses a single conditional order response (<c>POST</c> and <c>GET</c> on <c>/fapi/v1/algoOrder</c>).
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <param name="asOf">回應對應的時刻,用於補上缺漏的時間。The moment it describes.</param>
+    /// <returns>條件單,或失敗原因。The conditional order, or the reason it failed.</returns>
+    /// <remarks>
+    /// <c>POST</c> 與 <c>GET</c> 的回應<b>不同形</b>:<c>POST</c> 沒有 <c>actualOrderId</c>
+    /// (那張單還沒觸發,自然沒有實際委託),<c>GET</c> 才有,而 <c>GET</c> 反過來不帶
+    /// <c>activatePrice</c> 與 <c>callbackRate</c>。兩者共用這一支,靠的是這幾個欄位一律當成選填 ——
+    /// 在這裡缺欄位是正常情況,不是解析失敗。
+    /// The <c>POST</c> and <c>GET</c> responses are <b>not</b> the same shape: <c>POST</c> has no
+    /// <c>actualOrderId</c>, since nothing has triggered yet and there is no real order, while <c>GET</c>
+    /// carries it and in turn omits <c>activatePrice</c> and <c>callbackRate</c>. One reader serves both by
+    /// treating all of those as optional: a missing field here is normal rather than a parse failure.
+    /// </remarks>
+    public static Result<ConditionalOrder> ReadConditionalOrder(string json, DateTimeOffset asOf)
+    {
+        var parsed = TryParse(json, BinanceApiPaths.AlgoOrder);
+
+        if (!parsed.TryGetValue(out var document))
+        {
+            return parsed.ToFailure<ConditionalOrder>();
+        }
+
+        using (document)
+        {
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                ? ReadConditionalOrder(document.RootElement, asOf)
+                : BinanceErrors.MalformedResponse(
+                    "algoOrder 的回應不是 JSON 物件。The algoOrder response is not a JSON object.");
+        }
+    }
+
+    /// <summary>
+    /// 解析條件單清單的回應(<c>GET /fapi/v1/openAlgoOrders</c> 與 <c>GET /fapi/v1/allAlgoOrders</c>)。
+    /// Parses a conditional order list response (<c>GET /fapi/v1/openAlgoOrders</c> and
+    /// <c>GET /fapi/v1/allAlgoOrders</c>).
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <param name="asOf">回應對應的時刻,用於補上缺漏的時間。The moment it describes.</param>
+    /// <returns>條件單清單,或失敗原因。The conditional orders, or the reason it failed.</returns>
+    public static Result<IReadOnlyList<ConditionalOrder>> ReadConditionalOrders(string json, DateTimeOffset asOf)
+    {
+        var parsed = TryParse(json, BinanceApiPaths.OpenAlgoOrders);
+
+        if (!parsed.TryGetValue(out var document))
+        {
+            return parsed.ToFailure<IReadOnlyList<ConditionalOrder>>();
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return BinanceErrors.MalformedResponse(
+                    "openAlgoOrders 的回應不是 JSON 陣列。The openAlgoOrders response is not a JSON array.");
+            }
+
+            var orders = new List<ConditionalOrder>(document.RootElement.GetArrayLength());
+
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                var order = ReadConditionalOrder(element, asOf);
+
+                if (!order.TryGetValue(out var value))
+                {
+                    return order.ToFailure<IReadOnlyList<ConditionalOrder>>();
+                }
+
+                orders.Add(value);
+            }
+
+            return Result.Success<IReadOnlyList<ConditionalOrder>>(orders);
+        }
+    }
+
+    /// <summary>
+    /// 解析撤銷單張條件單的回應(<c>DELETE /fapi/v1/algoOrder</c>),取出被撤掉的那張的識別碼。
+    /// Parses the cancel response of one conditional order (<c>DELETE /fapi/v1/algoOrder</c>) and returns the
+    /// identifier of what was cancelled.
+    /// </summary>
+    /// <param name="json">回應本文。The response body.</param>
+    /// <returns>被撤掉的條件單識別碼,或失敗原因。The identifier, or the reason it failed.</returns>
+    /// <remarks>
+    /// <para>
+    /// 這個端點<b>不回傳那張條件單</b>,只回
+    /// <c>{"algoId":…,"clientAlgoId":…,"code":"200","msg":"success"}</c> —— 沒有方向、沒有類型、
+    /// 沒有觸發價。要交出一個完整的 <see cref="ConditionalOrder"/>,只能撤完之後再查一次。
+    /// This endpoint <b>does not return the conditional order</b>, only
+    /// <c>{"algoId":…,"clientAlgoId":…,"code":"200","msg":"success"}</c>: no side, no type, no trigger price.
+    /// Producing a complete <see cref="ConditionalOrder"/> means looking it up again after the cancellation.
+    /// </para>
+    /// <para>
+    /// <c>code</c> 在這個端點是<b>字串</b> <c>"200"</c>,而撤銷全部條件單那個端點回的是<b>數值</b> 200。
+    /// 同一個概念在相鄰兩個端點上型別不同,所以識別碼在這裡自己讀,不靠
+    /// <see cref="ReadAcknowledgement"/> 判成敗 —— 那一支只認數值型的 <c>code</c>。
+    /// The <c>code</c> is a <b>string</b> <c>"200"</c> here while the cancel-all endpoint answers with a
+    /// <b>numeric</b> 200: one concept, two types, on adjacent endpoints. The identifier is therefore read
+    /// here rather than leaning on <see cref="ReadAcknowledgement"/>, which recognises only a numeric
+    /// <c>code</c>.
+    /// </para>
+    /// </remarks>
+    public static Result<ConditionalOrderIdentifier> ReadConditionalOrderCancellation(string json)
+    {
+        var parsed = TryParse(json, BinanceApiPaths.AlgoOrder);
+
+        if (!parsed.TryGetValue(out var document))
+        {
+            return parsed.ToFailure<ConditionalOrderIdentifier>();
+        }
+
+        using (document)
+        {
+            var root = document.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return BinanceErrors.MalformedResponse(
+                    "algoOrder 撤單的回應不是 JSON 物件。The algoOrder cancel response is not a JSON object.");
+            }
+
+            if (BinanceJson.TryGetInt64(root, "algoId", out var algoId) && algoId > 0)
+            {
+                return Result.Success(
+                    ConditionalOrderIdentifier.FromExchangeId(algoId.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            return BinanceJson.TryGetString(root, "clientAlgoId", out var clientAlgoId)
+                ? Result.Success(ConditionalOrderIdentifier.FromClientId(clientAlgoId))
+                : BinanceErrors.MissingField("algoId", BinanceApiPaths.AlgoOrder);
+        }
+    }
+
+    /// <summary>
     /// 檢查「只回報成敗、不回報內容」的端點回應是否真的成功(撤銷全部掛單、改槓桿、改保證金模式)。
     /// Checks whether an acknowledgement-only response really succeeded: cancel-all, leverage, and margin mode.
     /// </summary>
@@ -405,6 +540,155 @@ public static class BinanceResponseReader
             UpdatedAt = updatedAt,
         };
     }
+
+    private static Result<ConditionalOrder> ReadConditionalOrder(JsonElement element, DateTimeOffset asOf)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return BinanceErrors.MalformedResponse(
+                "條件單清單的元素不是 JSON 物件。An element of the conditional order list is not a JSON object.");
+        }
+
+        if (!BinanceJson.TryGetString(element, "symbol", out var symbol))
+        {
+            return BinanceErrors.MissingField("symbol", BinanceApiPaths.AlgoOrder);
+        }
+
+        if (!BinanceJson.TryGetString(element, "clientAlgoId", out var clientAlgoId))
+        {
+            return BinanceErrors.MissingField("clientAlgoId", symbol).WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var statusText = BinanceJson.TryGetString(element, "algoStatus", out var readStatus) ? readStatus : null;
+        var status = BinanceAlgoOrderMapper.ParseAlgoStatus(statusText);
+
+        if (status == ConditionalOrderStatus.Unspecified)
+        {
+            // 對不上的狀態不放行,理由與一般委託相同:既不算有效、也不算終態的停損,
+            // 會讓對帳永遠等不到結局,而畫面上看起來一切正常。
+            // An unmapped status is not let through, for the same reason as on an ordinary order: a stop that
+            // counts as neither live nor final leaves reconciliation waiting for an outcome that never comes,
+            // while everything on screen looks fine.
+            return BinanceErrors.MalformedResponse(
+                    $"{symbol} 的條件單狀態「{statusText}」無法對映到任何已知狀態。The algo status \"{statusText}\" on {symbol} maps to no known state.")
+                .WithData(BinanceErrorDataKeys.Field, "algoStatus")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var sideText = BinanceJson.TryGetString(element, "side", out var readSide) ? readSide : null;
+        var side = BinanceOrderMapper.ParseOrderSide(sideText);
+
+        if (side == OrderSide.Unspecified)
+        {
+            return BinanceErrors.MalformedResponse(
+                    $"{symbol} 的買賣方向「{sideText}」無法對映。The order side \"{sideText}\" on {symbol} maps to nothing.")
+                .WithData(BinanceErrorDataKeys.Field, "side")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var typeText = BinanceJson.TryGetString(element, "orderType", out var readType) ? readType : null;
+        var conditionalOrderType = BinanceAlgoOrderMapper.ParseConditionalOrderType(typeText);
+
+        if (conditionalOrderType == ConditionalOrderType.Unspecified)
+        {
+            // 類型在這裡不能像一般委託那樣放過。查掛單會撈到手動下的單,那裡出現沒對映的委託類型是常態,
+            // 所以那一側回 Unspecified；但這條路徑上的每一張都是條件單,而條件單的類型決定了
+            // 「它會在什麼時候、以什麼方式動用部位」—— 不知道類型就等於不知道這張單會做什麼。
+            // Unlike an ordinary order, the type cannot be let through here. An open-orders listing includes
+            // hand-placed orders whose types this package does not model, which is why that side answers
+            // Unspecified; but everything on this path is a conditional order, and its type is what says when
+            // and how it will move the position. Not knowing the type is not knowing what the order will do.
+            return BinanceErrors.MalformedResponse(
+                    $"{symbol} 的條件單類型「{typeText}」無法對映到任何已知類型。The conditional order type \"{typeText}\" on {symbol} maps to no known type.")
+                .WithData(BinanceErrorDataKeys.Field, "orderType")
+                .WithData(BinanceErrorDataKeys.Symbol, symbol);
+        }
+
+        var updatedAt = BinanceJson.TryGetTimestamp(element, "updateTime", out var updateTime) ? updateTime : asOf;
+
+        return new ConditionalOrder
+        {
+            Symbol = symbol,
+            ClientConditionalOrderId = clientAlgoId,
+
+            // algoId 是數值,中立模型用字串裝 —— 別的交易所的編號不一定是數字。
+            // The id is numeric here while the neutral model stores a string, because other exchanges do not
+            // necessarily use numbers.
+            ExchangeConditionalOrderId = BinanceJson.TryGetInt64(element, "algoId", out var algoId)
+                ? algoId.ToString(CultureInfo.InvariantCulture)
+                : null,
+            Side = side,
+            ConditionalOrderType = conditionalOrderType,
+            Status = status,
+            PositionSide = BinanceOrderMapper.ParsePositionSide(
+                BinanceJson.TryGetString(element, "positionSide", out var positionSide) ? positionSide : null),
+            TimeInForce = BinanceOrderMapper.ParseTimeInForce(
+                BinanceJson.TryGetString(element, "timeInForce", out var timeInForce) ? timeInForce : null),
+            Quantity = BinanceJson.TryGetDecimal(element, "quantity", out var quantity) ? quantity : 0m,
+
+            // 幣安對「沒有這個價格」的表示是 0 或空字串,不是省略欄位;市價型條件單的 price 就是 "0"。
+            // 照抄下去會讓上層看到一張「限價零元」的停損。
+            // Binance writes "no such price" as 0 or an empty string rather than omitting the field: a
+            // market-style conditional order's price is "0". Copying that through shows a stop priced at zero.
+            TriggerPrice = ReadOptionalPrice(element, "triggerPrice"),
+            TriggerPriceType = ParseWorkingType(
+                BinanceJson.TryGetString(element, "workingType", out var workingType) ? workingType : null),
+            Price = ReadOptionalPrice(element, "price"),
+            CallbackRate = ReadOptionalPrice(element, "callbackRate"),
+            ActivationPrice = ReadOptionalPrice(element, "activatePrice"),
+            ReduceOnly = BinanceJson.TryGetBoolean(element, "reduceOnly", out var reduceOnly) && reduceOnly,
+            ClosePosition = BinanceJson.TryGetBoolean(element, "closePosition", out var closePosition)
+                && closePosition,
+
+            // actualOrderId 在未觸發時是空字串,不是省略,也不是 0。空字串代表「還沒有實際委託」,
+            // 照抄成 "" 會讓上層拿一個空字串去查單。
+            // actualOrderId is an empty string before the trigger rather than absent or zero. The empty string
+            // means there is no real order yet, and passing it through sends the caller to look up "".
+            TriggeredOrderId = ReadNonEmptyString(element, "actualOrderId"),
+
+            // triggerTime 未觸發時是 0,而 0 在 Unix 毫秒是 1970 年 —— 直接轉換會讓一張還沒觸發的停損
+            // 看起來像是五十年前就觸發過了。
+            // triggerTime is 0 before the trigger, and zero in Unix milliseconds is 1970: converting it
+            // directly makes an untriggered stop look as though it fired half a century ago.
+            TriggeredAt = ReadOptionalTimestamp(element, "triggerTime"),
+            CreatedAt = BinanceJson.TryGetTimestamp(element, "createTime", out var createdAt) ? createdAt : updatedAt,
+            UpdatedAt = updatedAt,
+        };
+    }
+
+    /// <summary>
+    /// 把幣安的 <c>workingType</c> 轉回中立的觸發價種類。
+    /// Converts a Binance <c>workingType</c> back into the neutral trigger price type.
+    /// </summary>
+    /// <param name="value">幣安回傳的字串。The string Binance returned.</param>
+    /// <returns>
+    /// 對映得到的種類;對不上時為 <see cref="TriggerPriceType.LastPrice"/>。
+    /// The mapped type, falling back to <see cref="TriggerPriceType.LastPrice"/>.
+    /// </returns>
+    /// <remarks>
+    /// 退路刻意是成交價而不是標記價,因為<b>幣安的預設就是 <c>CONTRACT_PRICE</c></b>。
+    /// 退成標記價會讓一張實際看成交價的停損被回報成「看標記價」,而那正是「為什麼被一根影線掃掉」
+    /// 查不出原因的來源。
+    /// The fallback is deliberately the traded price rather than the mark price, because
+    /// <b>Binance's own default is <c>CONTRACT_PRICE</c></b>. Falling back to the mark price would report a stop
+    /// that really watches traded prices as watching the mark — and that is exactly what makes "why did a single
+    /// wick take it out" impossible to answer.
+    /// </remarks>
+    private static TriggerPriceType ParseWorkingType(string? value) => value switch
+    {
+        "MARK_PRICE" => TriggerPriceType.MarkPrice,
+        _ => TriggerPriceType.LastPrice,
+    };
+
+    private static string? ReadNonEmptyString(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetString(element, propertyName, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : null;
+
+    private static DateTimeOffset? ReadOptionalTimestamp(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetInt64(element, propertyName, out var milliseconds) && milliseconds > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(milliseconds)
+            : null;
 
     private static string? ReadOrderTypeText(JsonElement element)
     {

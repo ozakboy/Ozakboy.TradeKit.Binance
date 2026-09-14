@@ -89,6 +89,34 @@ public static class BinanceRequestWeights
     /// <summary><c>DELETE /fapi/v1/allOpenOrders</c>。權重 1。Weight 1.</summary>
     public const int CancelAllOpenOrders = 1;
 
+    /// <summary><c>POST /fapi/v1/algoOrder</c>(新條件單)。取 1。Taken as 1.</summary>
+    /// <remarks>
+    /// 官方標示的 IP 權重是 0,計費改走下單速率(<c>X-MBX-ORDER-COUNT-10S</c> 與
+    /// <c>X-MBX-ORDER-COUNT-1M</c> 各算 1)。這裡取 1 的理由與 <see cref="PlaceOrder"/> 完全相同:
+    /// <c>WithWeight</c> 只接受正整數,而下單速率算在<b>帳戶</b>而非 IP 上,權重桶擋不到它。
+    /// 來源:官方 New Algo Order 端點的 <c>x-weight</c> 欄位,擷取日期 2026-09-14;
+    /// change-log 2026-06-20 有同樣的說明。
+    /// The documented IP weight is 0, with metering moved to the order rate limits (1 against each of
+    /// <c>X-MBX-ORDER-COUNT-10S</c> and <c>X-MBX-ORDER-COUNT-1M</c>). The value of 1 here is for exactly the
+    /// reasons given on <see cref="PlaceOrder"/>: <c>WithWeight</c> takes positive integers only, and the order
+    /// rate counts against the <b>account</b> rather than the IP, so the weight bucket cannot police it.
+    /// Source: the <c>x-weight</c> field of the official New Algo Order endpoint, retrieved 2026-09-14, and the
+    /// change-log entry of 2026-06-20.
+    /// </remarks>
+    public const int PlaceAlgoOrder = 1;
+
+    /// <summary><c>GET /fapi/v1/algoOrder</c>(查條件單)。權重 1。Weight 1.</summary>
+    public const int QueryAlgoOrder = 1;
+
+    /// <summary><c>DELETE /fapi/v1/algoOrder</c>(撤條件單)。權重 1。Weight 1.</summary>
+    public const int CancelAlgoOrder = 1;
+
+    /// <summary><c>DELETE /fapi/v1/algoOpenOrders</c>。權重 1。Weight 1.</summary>
+    public const int CancelAllOpenAlgoOrders = 1;
+
+    /// <summary><c>GET /fapi/v1/allAlgoOrders</c>(條件單歷史)。權重 5。Weight 5.</summary>
+    public const int AllAlgoOrders = 5;
+
     /// <summary>
     /// <c>POST /fapi/v1/leverage</c>、<c>POST /fapi/v1/marginType</c>、<c>POST /fapi/v1/positionMargin</c>。權重 1。
     /// Weight 1.
@@ -194,6 +222,27 @@ public static class BinanceRequestWeights
     public static int OpenOrders(bool hasSymbol) => hasSymbol ? 1 : 40;
 
     /// <summary>
+    /// 算出 <c>GET /fapi/v1/openAlgoOrders</c> 的權重。
+    /// Returns the weight of <c>GET /fapi/v1/openAlgoOrders</c>.
+    /// </summary>
+    /// <param name="hasSymbol">
+    /// 是否指定了 <c>symbol</c>。不指定的權重是 40,是指定時的四十倍,與一般掛單查詢同樣的懸崖。
+    /// Whether a <c>symbol</c> was supplied; omitting it costs 40 against 1, the same cliff as the ordinary
+    /// open-orders query.
+    /// </param>
+    /// <returns>對應的權重。The matching weight.</returns>
+    /// <remarks>
+    /// 官方文件原文:「1 for a single symbol; 40 when the symbol parameter is omitted. Careful when accessing
+    /// this with no symbol.」擷取日期 2026-09-14。對帳輪詢務必帶商品代碼 —— 每個部位都要確認「停損還在
+    /// 不在」是高頻動作,不帶代碼的版本會把限流額度燒光。
+    /// The official wording, retrieved 2026-09-14, is "1 for a single symbol; 40 when the symbol parameter is
+    /// omitted. Careful when accessing this with no symbol." Reconciliation polling must pass the symbol:
+    /// confirming that every position still has its stop is a frequent operation, and the symbol-less form
+    /// burns the quota.
+    /// </remarks>
+    public static int OpenAlgoOrders(bool hasSymbol) => hasSymbol ? 1 : 40;
+
+    /// <summary>
     /// 以人類可讀的形式列出固定權重表,供啟動時記錄或診斷使用。
     /// Renders the fixed weight table in human-readable form for start-up logging or diagnostics.
     /// </summary>
@@ -205,6 +254,8 @@ public static class BinanceRequestWeights
          account={Account}, balance={Balance}, positionRisk={PositionRisk},
          allOrders={AllOrders}, userTrades={UserTrades}, leverageBracket={LeverageBracket},
          placeOrder={PlaceOrder}, queryOrder={QueryOrder}, cancelOrder={CancelOrder},
-         cancelAllOpenOrders={CancelAllOpenOrders}, accountSetting={AccountSetting}
+         cancelAllOpenOrders={CancelAllOpenOrders}, accountSetting={AccountSetting},
+         placeAlgoOrder={PlaceAlgoOrder}, queryAlgoOrder={QueryAlgoOrder}, cancelAlgoOrder={CancelAlgoOrder},
+         cancelAllOpenAlgoOrders={CancelAllOpenAlgoOrders}, allAlgoOrders={AllAlgoOrders}
          """);
 }

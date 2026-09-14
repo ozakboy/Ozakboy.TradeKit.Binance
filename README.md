@@ -21,7 +21,7 @@ package, or another `Ozakboy.*` package.
 | Request weight table and rate limiting | Done |
 | Placing, cancelling, and querying orders; cancel-all and open orders | Done |
 | Leverage and margin mode | Done |
-| Conditional order parameter mapping (stop, take-profit, trailing) | Done, but the endpoint no longer accepts them — see below |
+| Conditional orders (stop, take-profit, trailing) over the Algo Order endpoints | Done — a separate path from ordinary orders, see below |
 | WebSocket market streams: klines and mark prices | Done |
 | WebSocket user data stream: orders, fills, account deltas, margin calls, resync signals | Done |
 
@@ -156,9 +156,9 @@ the queue capacity and backpressure strategy, and whether mark prices use the on
 
 ## User data stream
 
-`BinanceUserDataFeed` implements `IUserDataFeed`: order updates, fills, account deltas, margin calls, and
-reconciliation signals from the account's private stream. It needs API credentials and is registered with its own
-call, after `AddBinanceFutures`:
+`BinanceUserDataFeed` implements `IUserDataFeed`: order updates, conditional order updates, fills, account
+deltas, margin calls, and reconciliation signals from the account's private stream. It needs API credentials and
+is registered with its own call, after `AddBinanceFutures`:
 
 ```csharp
 services.AddBinanceFutures(options => { /* environment and credentials, as above */ });
@@ -377,16 +377,29 @@ the `clientOrderId` format and its 36-character ceiling, `closePosition` being l
 conditional orders, hedge mode refusing `reduceOnly`, and a trailing callback ceiling of 10 rather than the
 abstraction's 100.
 
-### Conditional orders are not currently accepted by `/fapi/v1/order` (`-4120`)
+### Conditional orders travel their own path, and `/fapi/v1/order` refuses them (`-4120`)
 
-Measured against Testnet on 2026-09-11: `STOP_MARKET` and `TRAILING_STOP_MARKET` sent to `/fapi/v1/order`
-answer `-4120 Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.`
+Binance moved `STOP_MARKET`, `TAKE_PROFIT_MARKET`, `STOP`, `TAKE_PROFIT`, and `TRAILING_STOP_MARKET` to the
+Algo Service on 2025-12-09. Sending one to `/fapi/v1/order` answers `-4120 Order type not supported for this
+endpoint. Please use the Algo Order API endpoints instead.` — measured against Testnet on 2026-09-11 and pinned
+by a test, so the day it stops being true the test goes red.
 
-The parameter set itself is correct; the **endpoint** changed. The code therefore maps to
-`TradeErrorCodes.NotSupported` rather than to an argument error, because the latter sends the reader back to
-inspect arguments that no edit will make this endpoint accept. The conditional mapping is written and tested,
-but **end to end it is only verified as far as "this endpoint refuses it"**: really placing a conditional order
-means wiring up the Algo Order endpoints, which is outside this stage.
+They therefore go through `PlaceConditionalOrderAsync` and the four methods beside it, which call
+`/fapi/v1/algoOrder` and its siblings. Three consequences are easy to miss, and every one of them is silent:
+
+* **`GetOpenOrdersAsync` does not see them.** Reconciling with it alone concludes "no resting orders" while the
+  stops sit safely on the other path — or are genuinely missing, which looks identical. Use
+  `GetOpenConditionalOrdersAsync`, and pass the symbol: without one the weight is 40 rather than 1.
+* **`SubscribeOrderUpdatesAsync` does not carry them.** A stop triggering appears only on
+  `SubscribeConditionalOrderUpdatesAsync`, as an `ALGO_UPDATE`. What reaches the order stream is the fill of
+  the order the trigger produced, linked back only by `ConditionalOrder.TriggeredOrderId`.
+* **`CancelAllOrdersAsync` does not cancel them.** An emergency exit calls `CancelAllConditionalOrdersAsync`
+  too, because a stop left behind after the position closes opens a new one in the opposite direction.
+
+Two more things the documentation states and this client passes on. A conditional order is **not margin-checked
+before it triggers**, so one that rested successfully can still end as `Rejected` at the trigger — and the
+reason appears exactly once, in `ConditionalOrderUpdate.RejectReason`. And an **untriggered conditional order
+cannot be modified**, so moving a stop means cancel and replace, with an unprotected gap in between.
 
 ### Quantities always align downwards
 

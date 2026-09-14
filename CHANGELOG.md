@@ -8,6 +8,88 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-09-14
+
+**條件單改走 Algo Order;`PlaceOrderAsync` 送條件單型別會被交易所拒絕。**
+**Conditional orders now go through the Algo Order endpoints; `PlaceOrderAsync` sends a conditional type only
+to have the exchange reject it.**
+
+幣安自 2025-12-09 起把 `STOP_MARKET`、`TAKE_PROFIT_MARKET`、`STOP`、`TAKE_PROFIT`、
+`TRAILING_STOP_MARKET` 移到 Algo Service,舊的 `POST /fapi/v1/order` 對這幾個型別一律回
+`-4120 STOP_ORDER_SWITCH_ALGO`。0.1.x 送得出去,但拿回來的是一句看不出原因的拒單 ——
+而拒單的那張單是停損,上層卻以為部位有保護。本版把那條路徑補齊。
+Binance moved those five types to the Algo Service on 2025-12-09, and the old `POST /fapi/v1/order` answers
+`-4120 STOP_ORDER_SWITCH_ALGO` for every one of them. 0.1.x could send them and got back an uninformative
+rejection — for an order that was a stop, while the caller believed the position was protected. This release
+supplies the missing path.
+
+### 新增功能 / Added
+
+- **`BinanceFuturesClient` 的五個條件單方法 / five conditional order methods**:
+  `PlaceConditionalOrderAsync`(`POST /fapi/v1/algoOrder`)、
+  `CancelConditionalOrderAsync`(`DELETE /fapi/v1/algoOrder`)、
+  `GetConditionalOrderAsync`(`GET /fapi/v1/algoOrder`)、
+  `GetOpenConditionalOrdersAsync`(`GET /fapi/v1/openAlgoOrders`)、
+  `CancelAllConditionalOrdersAsync`(`DELETE /fapi/v1/algoOpenOrders`)。
+  **送單與一般下單同樣絕不重試**:標記 `AsNonIdempotent()` 並釘上 `RetryPolicy.NoRetry`。
+  逾時之後請用同一個 `clientAlgoId` 查單 —— 重送的後果比重複下單更糟,兩張停損之中的一張會在部位
+  被另一張平掉之後反手開倉。
+  **Placement is never retried**, exactly as for an ordinary order. After a timeout, look it up by the same
+  `clientAlgoId`: re-sending is worse here than for a plain order, because once one of two stops closes the
+  position the other opens an inverted one.
+- **`BinanceUserDataFeed.SubscribeConditionalOrderUpdatesAsync`**:條件單的狀態變化來自新的
+  `ALGO_UPDATE` 事件,**不會**出現在 `SubscribeOrderUpdatesAsync`。事件名已加進撥號時的 `events`
+  過濾器 —— 那份清單漏一個名稱,對應的事件就永遠不來,而連線與其他事件完全正常,沒有任何錯誤指向它。
+  Conditional order state changes arrive on the new `ALGO_UPDATE` event and **never** on
+  `SubscribeOrderUpdatesAsync`. The event name has been added to the `events` filter used when dialling: a name
+  missing from that list means the event never arrives, while the connection and every other event behave
+  normally and nothing points at the cause.
+- **`BinanceRequestWeights`** 新增五個條件單端點的權重,含 `OpenAlgoOrders(bool hasSymbol)` ——
+  不帶商品代碼是 **40**,帶了是 1。對帳輪詢務必帶上商品代碼。
+  Five conditional endpoint weights, including `OpenAlgoOrders(bool hasSymbol)`: **40** without a symbol
+  against 1 with one. Reconciliation polling must pass the symbol.
+
+### 破壞性變更 / Breaking
+
+- 相依的 `Ozakboy.TradeKit.Abstractions` 由 0.3.0 升至 **0.4.0**,後者在 `IExchangeClient` 與
+  `IUserDataFeed` 上新增了條件單成員。自訂實作這兩個介面的呼叫端需要一併補上。
+  The dependency moves to **0.4.0**, which adds conditional members to `IExchangeClient` and `IUserDataFeed`.
+  Anyone implementing those interfaces has to supply them too.
+- `PlaceOrderAsync` 的合約收窄為只收非條件單。這不是本套件新加的限制,是交易所已經在做的事。
+  `PlaceOrderAsync` now takes non-conditional orders only — not a new restriction here but the one the
+  exchange already enforces.
+
+### 技術改進 / Technical
+
+- **幣安的 Algo 端點沒有自己的一組錯誤碼**:官方 error-code 頁面上唯一與 algo 有關的只有 `-4120`。
+  條件單查不到回的是一般的 `-2013`、編號重複回 `-4116`、掛太多回 `-2025`,與一般委託完全同碼。
+  因此區分在呼叫端做:條件單路徑上的失敗會改標成 `trade.conditional_order_not_found` 等專屬代碼。
+  共用代碼的代價是上層分不出「停損不見了」與「進場單不見了」,而前者代表部位正在裸奔。
+  **The algo endpoints have no error codes of their own**; the only algo-related entry on the official page is
+  `-4120`. Failures on the conditional path are therefore re-labelled at the call site, because sharing the
+  codes leaves callers unable to tell "the stop is gone" from "the entry is gone".
+- **撤銷單張條件單會打兩次網路**:`DELETE` 的回應只有 `{algoId, clientAlgoId, code, msg}`,
+  沒有方向、沒有類型、沒有觸發價,湊不出一個誠實的 `ConditionalOrder`;因此撤完再查一次。
+  多一次權重 1 的查詢,換的是不必在回傳值裡填 `Unspecified`。
+  **Cancelling one conditional order makes two calls**: the `DELETE` response carries no side, type, or trigger
+  price, so the order is read back afterwards. One extra request of weight 1 buys not returning `Unspecified`.
+- 幾個必須逐字照抄、抄錯不會報錯只會靜默出事的地方,都有測試釘住:
+  參數名是 `triggerPrice` 而不是 `stopPrice`、是 `activatePrice`(動詞)而不是 `activationPrice`;
+  `algoStatus` 的拼字是 `CANCELED`(一個 L),而且沒有 `WORKING` 與 `FILLED`;
+  `FINISHED` 的官方定義是「filled or canceled」,對映到 `ConditionalOrderStatus.Finished` 而不是
+  `Filled` —— 讀成成交會讓一張觸發後被撤掉的停損在帳上變成一次不存在的平倉。
+  Every literal that has to be copied exactly — and whose mistyping fails silently rather than loudly — is
+  pinned by a test.
+- 條件單有**全帳戶合計 200 張**的上限(不是每個商品各 200 張),已寫進
+  `PlaceConditionalOrderAsync` 的說明。**未觸發的條件單不支援改單**,調整觸發價只能撤掉重下。
+  The limit is **200 conditional orders across the whole account**, not per symbol, and an untriggered
+  conditional order **cannot be modified**; changing a trigger price means cancel and replace.
+
+規格出處:幣安官方 USDⓈ-M Futures 文件的 Trade REST API、User Data Streams、Error Code 與 Change Log
+四頁,擷取日期 2026-09-14。
+Specification sources: the Trade REST API, User Data Streams, Error Code, and Change Log pages of the official
+Binance USDⓈ-M Futures documentation, retrieved 2026-09-14.
+
 ## [0.1.4] - 2026-09-14
 
 串流憑證的生命週期從這一版起看得見。續期成功、續期失敗、憑證失效各有一行日誌,次數與時刻另以

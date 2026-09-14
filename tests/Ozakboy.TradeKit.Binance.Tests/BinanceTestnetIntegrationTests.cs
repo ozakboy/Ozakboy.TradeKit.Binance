@@ -481,6 +481,203 @@ public sealed class BinanceTestnetIntegrationTests
         Assert.AreEqual(clientOrderId, echoed);
     }
 
+    // ── 條件單 / Conditional orders ──────────────────────────────────────────
+
+    [TestMethod]
+    [TestCategory("Testnet")]
+    public async Task PlacesQueriesAndCancelsAOneOffConditionalOrder()
+    {
+        // 這是 -4120 那一條的另一半:同一種委託類型走 Algo 端點就會被接受。
+        // 兩條一起看才說得完整 —— 舊端點拒絕、新端點接受。
+        // This is the other half of the -4120 test: the same order type is accepted on the algo endpoint. The
+        // two together tell the whole story — refused on the old path, accepted on the new one.
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        var (triggerPrice, quantity) = await BuildRestingOrderAsync(client);
+        var clientAlgoId = NewClientOrderId("cs");
+
+        var placed = await client.PlaceConditionalOrderAsync(new ConditionalOrderRequest
+        {
+            Symbol = Symbol,
+            Side = OrderSide.Sell,
+            ConditionalOrderType = ConditionalOrderType.StopMarket,
+            Quantity = quantity,
+            TriggerPrice = triggerPrice,
+            TriggerPriceType = TriggerPriceType.MarkPrice,
+            ClientConditionalOrderId = clientAlgoId,
+        });
+
+        Assert.IsTrue(placed.IsSuccess, placed.Error?.Message);
+
+        var order = placed.GetValueOrThrow();
+
+        try
+        {
+            Assert.AreEqual(Symbol, order.Symbol);
+            Assert.AreEqual(clientAlgoId, order.ClientConditionalOrderId);
+            Assert.AreEqual(ConditionalOrderStatus.New, order.Status);
+            Assert.AreEqual(ConditionalOrderType.StopMarket, order.ConditionalOrderType);
+            Assert.AreEqual(OrderSide.Sell, order.Side);
+            Assert.AreEqual(triggerPrice, order.TriggerPrice);
+            Assert.AreEqual(quantity, order.Quantity);
+            Assert.IsNotNull(order.ExchangeConditionalOrderId);
+
+            // 觸發價在標記價下方約 4%,測試期間走不到。真的走到了,代表這條測試的前提壞了,
+            // 而那比斷言失敗嚴重 —— 它代表剛剛真的開了一個部位。
+            // The trigger sits about 4% below the mark and cannot be reached during the test. Reaching it
+            // would mean the premise of this test has broken, which is worse than a failed assertion: it
+            // means a position was just opened.
+            Assert.IsNull(order.TriggeredOrderId, "條件單觸發了 —— 觸發價離標記價不夠遠。");
+            Assert.IsNull(order.TriggeredAt);
+
+            // 用交易所編號查得回來。
+            // It can be found by exchange id.
+            var byAlgoId = await client.GetConditionalOrderAsync(
+                Symbol,
+                ConditionalOrderIdentifier.FromExchangeId(order.ExchangeConditionalOrderId!));
+
+            Assert.IsTrue(byAlgoId.IsSuccess, byAlgoId.Error?.Message);
+            Assert.AreEqual(
+                order.ExchangeConditionalOrderId,
+                byAlgoId.GetValueOrThrow().ExchangeConditionalOrderId);
+
+            // 也用 clientAlgoId 查得回來 —— 這正是送單逾時之後唯一能走的那條路。
+            // And by clientAlgoId, which is the only route available after a submission times out.
+            var byClientId = await client.GetConditionalOrderAsync(
+                Symbol,
+                ConditionalOrderIdentifier.FromClientId(clientAlgoId));
+
+            Assert.IsTrue(byClientId.IsSuccess, byClientId.Error?.Message);
+            Assert.AreEqual(
+                order.ExchangeConditionalOrderId,
+                byClientId.GetValueOrThrow().ExchangeConditionalOrderId);
+
+            // 未結條件單清單裡看得到它。
+            // It appears in the open conditional order listing.
+            var open = await client.GetOpenConditionalOrdersAsync(Symbol);
+
+            Assert.IsTrue(open.IsSuccess, open.Error?.Message);
+            Assert.IsTrue(
+                open.GetValueOrThrow().Any(candidate => candidate.ClientConditionalOrderId == clientAlgoId),
+                "未結條件單清單裡找不到剛送出去的那張。");
+
+            // 一般掛單清單看不到它 —— 這正是為什麼對帳不能只查那一邊。
+            // The ordinary open-orders listing does not see it, which is why reconciliation cannot rely on
+            // that side alone.
+            var plainOrders = await client.GetOpenOrdersAsync(Symbol);
+
+            Assert.IsTrue(plainOrders.IsSuccess, plainOrders.Error?.Message);
+            Assert.IsFalse(
+                plainOrders.GetValueOrThrow().Any(candidate => candidate.ClientOrderId == clientAlgoId),
+                "條件單出現在一般掛單清單裡,本測試對兩個端點互不涵蓋的假設需要重新檢查。");
+        }
+        finally
+        {
+            // 斷言失敗也要撤。留著的條件單比留著的掛單危險:它會在某個價位真的動用部位。
+            // Cancelled even when an assertion fails. A stray conditional order is worse than a stray limit
+            // order, because it will really move the position at some price.
+            var cancelled = await client.CancelConditionalOrderAsync(
+                Symbol,
+                ConditionalOrderIdentifier.FromClientId(clientAlgoId));
+
+            Assert.IsTrue(cancelled.IsSuccess, cancelled.Error?.Message);
+            Assert.AreEqual(ConditionalOrderStatus.Canceled, cancelled.GetValueOrThrow().Status);
+        }
+
+        var remaining = await client.GetOpenConditionalOrdersAsync(Symbol);
+
+        Assert.IsTrue(remaining.IsSuccess, remaining.Error?.Message);
+        Assert.IsFalse(
+            remaining.GetValueOrThrow().Any(candidate => candidate.ClientConditionalOrderId == clientAlgoId),
+            "撤完之後那張條件單還在未結清單裡。");
+    }
+
+    [TestMethod]
+    [TestCategory("Testnet")]
+    public async Task CancelsEveryConditionalOrderOnASymbol()
+    {
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        var (triggerPrice, quantity) = await BuildRestingOrderAsync(client);
+        var symbol = (await client.GetSymbolAsync(Symbol)).GetValueOrThrow();
+
+        try
+        {
+            // 兩張,觸發價差一個跳動點,確認撤的是「全部」而不是「一張」。
+            // Two orders one tick apart, to confirm that all of them go rather than one.
+            foreach (var offset in new[] { 0, 1 })
+            {
+                var placed = await client.PlaceConditionalOrderAsync(new ConditionalOrderRequest
+                {
+                    Symbol = Symbol,
+                    Side = OrderSide.Sell,
+                    ConditionalOrderType = ConditionalOrderType.StopMarket,
+                    Quantity = quantity,
+                    TriggerPrice = triggerPrice - (offset * symbol.TickSize),
+                    TriggerPriceType = TriggerPriceType.MarkPrice,
+                    ClientConditionalOrderId = NewClientOrderId($"cc{offset}"),
+                });
+
+                Assert.IsTrue(placed.IsSuccess, placed.Error?.Message);
+            }
+
+            var before = await client.GetOpenConditionalOrdersAsync(Symbol);
+
+            Assert.IsTrue(before.IsSuccess, before.Error?.Message);
+            Assert.IsGreaterThanOrEqualTo(2, before.GetValueOrThrow().Count);
+        }
+        finally
+        {
+            var cancelled = await client.CancelAllConditionalOrdersAsync(Symbol);
+
+            Assert.IsTrue(cancelled.IsSuccess, cancelled.Error?.Message);
+        }
+
+        var after = await client.GetOpenConditionalOrdersAsync(Symbol);
+
+        Assert.IsTrue(after.IsSuccess, after.Error?.Message);
+        Assert.HasCount(0, after.GetValueOrThrow());
+    }
+
+    [TestMethod]
+    [TestCategory("Testnet")]
+    public async Task LooksUpAConditionalOrderThatDoesNotExistAndSaysSo()
+    {
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        var missing = await client.GetConditionalOrderAsync(
+            Symbol,
+            ConditionalOrderIdentifier.FromClientId(NewClientOrderId("nx")));
+
+        Assert.IsTrue(missing.IsFailure);
+
+        // 條件單專屬的代碼,不是一般委託那一個。共用代碼會讓上層分不出「停損不見了」與
+        // 「進場單不見了」,而前者代表部位正在裸奔。
+        // The conditional-specific code rather than the ordinary one: sharing them leaves callers unable to
+        // tell "the stop is gone" from "the entry is gone", and the first means a position is unprotected.
+        Assert.AreEqual(TradeErrorCodes.ConditionalOrderNotFound, missing.Error!.Code);
+    }
+
+    [TestMethod]
+    [TestCategory("Testnet")]
+    public async Task CancellingEveryConditionalOrderWithNothingToCancelIsStillSuccess()
+    {
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        // 緊急出場會無條件先撤條件單再平倉,所以「本來就沒有」必須是成功而不是失敗。
+        // An emergency exit cancels conditional orders unconditionally before closing, so "there were none"
+        // has to be a success rather than a failure.
+        _ = await client.CancelAllConditionalOrdersAsync(Symbol);
+
+        var second = await client.CancelAllConditionalOrdersAsync(Symbol);
+
+        Assert.IsTrue(second.IsSuccess, second.Error?.Message);
+    }
+
     [TestMethod]
     [TestCategory("Testnet")]
     public async Task AnOrderBelowTheMinimumNotionalNeverLeavesTheProcess()
@@ -535,6 +732,32 @@ public sealed class BinanceTestnetIntegrationTests
             $"Testnet 上還留著 {leftovers.Count} 張測試單:{string.Join(", ", leftovers.Select(order => order.ClientOrderId))}");
     }
 
+    [TestMethod]
+    [TestCategory("Testnet")]
+    public async Task NoTestConditionalOrderIsLeftBehind()
+    {
+        // 條件單是<b>另一個</b>端點,上面那條查不到它。漏了這一條,一張留在 Testnet 上的停損
+        // 會在某個價位真的開出一個部位,而所有掛單檢查都顯示乾淨。
+        // Conditional orders live on <b>another</b> endpoint and the check above cannot see them. Without this
+        // one, a stop left on Testnet really opens a position at some price while every open-orders check
+        // reports a clean account.
+        using var provider = BuildOrSkip();
+        var client = provider!.GetRequiredService<BinanceFuturesClient>();
+
+        var open = await client.GetOpenConditionalOrdersAsync();
+
+        Assert.IsTrue(open.IsSuccess, open.Error?.Message);
+
+        var leftovers = open.GetValueOrThrow()
+            .Where(order => order.ClientConditionalOrderId.StartsWith(TestOrderPrefix, StringComparison.Ordinal))
+            .ToList();
+
+        Assert.HasCount(
+            0,
+            leftovers,
+            $"Testnet 上還留著 {leftovers.Count} 張測試條件單:{string.Join(", ", leftovers.Select(order => order.ClientConditionalOrderId))}");
+    }
+
     /// <summary>
     /// 類別收尾:再確認一次沒有測試單殘留;有的話當場撤掉,並讓這個測試回合失敗。
     /// Class teardown: confirm once more that no test order survives, cancelling any that did and failing the
@@ -566,11 +789,28 @@ public sealed class BinanceTestnetIntegrationTests
                 $"收尾時查不到掛單清單,無法確認有沒有殘留:{open.Error!.Message}");
         }
 
+        // 條件單是另一個端點,上面那一查看不到它們。兩邊都要掃,而且掃不到也要當成失敗 ——
+        // 「查不到清單」與「清單是空的」在收尾這一步的意義完全不同。
+        // Conditional orders live on another endpoint and the query above cannot see them. Both sides are
+        // swept, and a failed sweep counts as a failure: at this step "could not read the list" and "the list
+        // is empty" mean entirely different things.
+        var openConditional = await client.GetOpenConditionalOrdersAsync();
+
+        if (!openConditional.TryGetValue(out var conditionalOrders))
+        {
+            throw new InvalidOperationException(
+                $"收尾時查不到未結條件單清單,無法確認有沒有殘留:{openConditional.Error!.Message}");
+        }
+
         var leftovers = orders
             .Where(order => order.ClientOrderId.StartsWith(TestOrderPrefix, StringComparison.Ordinal))
             .ToList();
 
-        if (leftovers.Count == 0)
+        var conditionalLeftovers = conditionalOrders
+            .Where(order => order.ClientConditionalOrderId.StartsWith(TestOrderPrefix, StringComparison.Ordinal))
+            .ToList();
+
+        if (leftovers.Count == 0 && conditionalLeftovers.Count == 0)
         {
             return;
         }
@@ -580,7 +820,15 @@ public sealed class BinanceTestnetIntegrationTests
             _ = await client.CancelAllOrdersAsync(symbol);
         }
 
+        foreach (var symbol in conditionalLeftovers.Select(order => order.Symbol).Distinct(StringComparer.Ordinal))
+        {
+            _ = await client.CancelAllConditionalOrdersAsync(symbol);
+        }
+
+        var names = leftovers.Select(order => order.ClientOrderId)
+            .Concat(conditionalLeftovers.Select(order => order.ClientConditionalOrderId));
+
         throw new InvalidOperationException(
-            $"測試結束時仍有 {leftovers.Count} 張測試單掛在 Testnet 上,已在收尾時撤除,但這代表某條測試沒有撤乾淨:{string.Join(", ", leftovers.Select(order => order.ClientOrderId))}");
+            $"測試結束時仍有 {leftovers.Count} 張測試單與 {conditionalLeftovers.Count} 張測試條件單掛在 Testnet 上,已在收尾時撤除,但這代表某條測試沒有撤乾淨:{string.Join(", ", names)}");
     }
 }

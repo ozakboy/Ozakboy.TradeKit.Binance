@@ -88,6 +88,84 @@ public sealed class BinanceUserDataFeedTests
     }
 
     [TestMethod]
+    public async Task AConditionalOrderEventFeedsOnlyItsOwnStream()
+    {
+        // ALGO_UPDATE 與 ORDER_TRADE_UPDATE 是兩個不同的事件,分流也必須是分開的。
+        // 若條件單事件漏進委託串流,上層會看到一張沒有成交資訊、狀態語意也不同的假委託;
+        // 若它沒進條件單串流,「停損被觸發了」這件事就整個消失。
+        // ALGO_UPDATE and ORDER_TRADE_UPDATE are different events and the fan-out has to keep them apart.
+        // Leaking a conditional event into the order stream shows the caller a phantom order with no fill
+        // information and different status semantics; failing to publish it loses the fact that a stop
+        // triggered at all.
+        var connection = new FakeWebSocketConnection([]);
+        var (feed, _, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
+
+        using (http)
+        {
+            await using (feed)
+            {
+                var conditionals = feed.SubscribeConditionalOrderUpdatesAsync().GetAsyncEnumerator();
+                var orders = feed.SubscribeOrderUpdatesAsync().GetAsyncEnumerator();
+
+                var conditionalMove = conditionals.MoveNextAsync();
+                var orderMove = orders.MoveNextAsync();
+
+                connection.Enqueue(UserDataSamples.AlgoNew);
+
+                try
+                {
+                    Assert.IsTrue(await conditionalMove.AsTask().WaitAsync(UserDataFixture.Timeout));
+
+                    var update = conditionals.Current.GetValueOrThrow();
+
+                    Assert.AreEqual("pulsetrade-algo-1", update.ConditionalOrder.ClientConditionalOrderId);
+                    Assert.AreEqual(ConditionalOrderStatus.New, update.ConditionalOrder.Status);
+
+                    // 委託串流不該收到任何東西。再推一則真正的委託事件上去,它才會動 ——
+                    // 那也證明這條串流本來就是活的,上面那個「沒收到」不是因為它根本沒在跑。
+                    // The order stream should have received nothing. Pushing a real order event makes it move,
+                    // which also proves the stream was alive and the silence above was not simply a dead one.
+                    Assert.IsFalse(orderMove.IsCompleted, "條件單事件不該出現在委託串流上。");
+
+                    connection.Enqueue(UserDataSamples.OrderNew);
+
+                    Assert.IsTrue(await orderMove.AsTask().WaitAsync(UserDataFixture.Timeout));
+                    Assert.AreEqual("pulsetrade-uds-1", orders.Current.GetValueOrThrow().ClientOrderId);
+                }
+                finally
+                {
+                    await conditionals.DisposeAsync();
+                    await orders.DisposeAsync();
+                }
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task ARejectedConditionalOrderReachesTheSubscriberWithItsReason()
+    {
+        // 停損被拒是「以為有保護、其實沒有」,而原因只在這則事件裡出現一次。
+        // 分流若把它吞掉,上層就再也查不到為什麼。
+        // A rejected stop is protection believed to be in place that is not, and the reason appears exactly
+        // once in this event. If the fan-out swallows it, the caller can never find out why.
+        var connection = new FakeWebSocketConnection([UserDataSamples.AlgoRejected]);
+        var (feed, _, http) = UserDataFixture.Create(new FakeWebSocketConnectionFactory(connection));
+
+        using (http)
+        {
+            await using (feed)
+            {
+                var items = await UserDataFixture.TakeAsync(feed.SubscribeConditionalOrderUpdatesAsync(), 1);
+
+                var update = items[0].GetValueOrThrow();
+
+                Assert.AreEqual(ConditionalOrderStatus.Rejected, update.ConditionalOrder.Status);
+                Assert.AreEqual("Reduce Only reject", update.RejectReason);
+            }
+        }
+    }
+
+    [TestMethod]
     public async Task TwoSubscribersToTheSameEventEachReceiveTheirOwnCompleteCopy()
     {
         // 共用一份佇列會讓兩個消費端瓜分事件,而那種錯誤的症狀是「兩邊都只看到一半,
@@ -607,11 +685,18 @@ public sealed class BinanceUserDataFeedTests
 
                 var events = query["events"].Split('/');
 
-                Assert.HasCount(4, events);
+                Assert.HasCount(5, events);
                 CollectionAssert.AreEquivalent(
                     new[]
                     {
                         BinanceUserDataPaths.OrderTradeUpdateEvent,
+
+                        // 漏掉這一個,條件單事件就永遠不會來 —— 而且連線照樣成功、其他事件照樣收得到,
+                        // 沒有任何錯誤指向這裡。停損被觸發或被拒絕,上層全部看不到。
+                        // Leave this one out and conditional order events never arrive, while the connection
+                        // still succeeds and every other event still flows, with nothing pointing here. A stop
+                        // triggering or being rejected becomes invisible to the caller.
+                        BinanceUserDataPaths.AlgoUpdateEvent,
                         BinanceUserDataPaths.AccountUpdateEvent,
                         BinanceUserDataPaths.MarginCallEvent,
                         BinanceUserDataPaths.ListenKeyExpiredEvent,

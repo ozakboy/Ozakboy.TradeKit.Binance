@@ -21,7 +21,7 @@
 | 請求權重表與限流 | 已完成 |
 | 下單、撤單、撤銷全部掛單、查單、查未結委託 | 已完成 |
 | 改槓桿與保證金模式 | 已完成 |
-| 條件單(停損、停利、移動停損)的參數對映 | 已完成,但端點已不受理(見下方) |
+| 條件單(停損、停利、移動停損),走 Algo Order 端點 | 已完成 —— 與一般委託是分開的路徑,見下方 |
 | WebSocket 行情串流:K 線與標記價 | 完成 |
 | WebSocket 使用者資料串流:委託、成交、帳戶增量、保證金追繳、對帳訊號 | 完成 |
 
@@ -149,8 +149,8 @@ await foreach (var item in feed.SubscribeKlinesAsync(["BTCUSDT", "ETHUSDT"], Kli
 
 ## 使用者資料串流
 
-`BinanceUserDataFeed` 實作 `IUserDataFeed`:帳戶私有串流上的委託更新、成交、帳戶增量、保證金追繳與對帳訊號。
-它需要 API 憑證,註冊是獨立的一個呼叫,接在 `AddBinanceFutures` 之後:
+`BinanceUserDataFeed` 實作 `IUserDataFeed`:帳戶私有串流上的委託更新、條件單更新、成交、帳戶增量、
+保證金追繳與對帳訊號。它需要 API 憑證,註冊是獨立的一個呼叫,接在 `AddBinanceFutures` 之後:
 
 ```csharp
 services.AddBinanceFutures(options => { /* 環境與憑證,同上 */ });
@@ -346,15 +346,28 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 `closePosition` 只能用於市價型條件單、雙向模式不可帶 `reduceOnly`、
 移動停損的回撤比例上限是 10 而不是抽象層允許的 100。
 
-### 條件單目前不被 `/fapi/v1/order` 受理(`-4120`)
+### 條件單走的是另一條路,`/fapi/v1/order` 會拒絕它們(`-4120`)
 
-2026-09-11 在 Testnet 實測:`STOP_MARKET` 與 `TRAILING_STOP_MARKET` 送到 `/fapi/v1/order`
-會得到 `-4120 Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.`
+幣安自 2025-12-09 起把 `STOP_MARKET`、`TAKE_PROFIT_MARKET`、`STOP`、`TAKE_PROFIT`、
+`TRAILING_STOP_MARKET` 移到 Algo Service。送到 `/fapi/v1/order` 會得到
+`-4120 Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.`
+—— 2026-09-11 在 Testnet 實測,並且釘成一條測試:哪天這件事不再成立,那條測試會紅。
 
-參數的組法本身沒有錯,是**端點**變了。因此這一碼對映成 `TradeErrorCodes.NotSupported` 而不是
-「參數錯誤」—— 後者會讓人回頭反覆檢查參數,而參數再怎麼改都不會讓這個端點接受它。
-條件單的參數對映已經寫好也測過,但**端到端只驗到「被這個端點拒絕」**;
-真正要下條件單需要接 Algo Order 端點,那不在本階段的範圍內。
+因此條件單走 `PlaceConditionalOrderAsync` 與它旁邊那四個方法,打的是 `/fapi/v1/algoOrder` 那一組端點。
+有三個容易漏掉的後果,而且每一個都是無聲的:
+
+* **`GetOpenOrdersAsync` 看不到它們。** 只用它對帳會得到「沒有任何掛單」的結論,而停損其實好端端地
+  掛在另一條路徑上 —— 或者根本不在,兩者長得一模一樣。請改用 `GetOpenConditionalOrdersAsync`,
+  而且要帶商品代碼:不帶的權重是 40,帶了是 1。
+* **`SubscribeOrderUpdatesAsync` 不帶它們。** 停損被觸發這件事只出現在
+  `SubscribeConditionalOrderUpdatesAsync`,事件是 `ALGO_UPDATE`;流到委託串流上的是觸發之後那張委託的
+  成交,兩者要靠 `ConditionalOrder.TriggeredOrderId` 才接得回去。
+* **`CancelAllOrdersAsync` 撤不掉它們。** 緊急出場要一併呼叫 `CancelAllConditionalOrdersAsync`,
+  否則平倉之後留下來的那張停損會反手開出一個沒人要的反向部位。
+
+另外兩件官方文件寫明、本套件照實轉達的事:條件單在**觸發之前不做保證金檢查**,所以一張成功掛上的停損
+仍可能在觸發當下以 `Rejected` 收場,而原因只出現一次,在 `ConditionalOrderUpdate.RejectReason`;
+以及**未觸發的條件單不支援改單**,要移動停損只能撤掉重下,中間有一段沒有保護的空窗。
 
 ### 數量一律向下對齊
 

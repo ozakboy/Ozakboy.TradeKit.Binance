@@ -186,6 +186,40 @@ internal static class BinanceUserDataReader
 
     private const string ClosePositionField = "cp";
 
+    // ── ALGO_UPDATE 專屬欄位 / fields specific to ALGO_UPDATE ──
+
+    /// <summary>用戶端條件單編號。The client algo id.</summary>
+    private const string ClientAlgoIdField = "caid";
+
+    /// <summary>交易所條件單編號。The exchange algo id.</summary>
+    private const string AlgoIdField = "aid";
+
+    /// <summary>觸發價。The trigger price.</summary>
+    private const string TriggerPriceField = "tp";
+
+    /// <summary>觸發價種類(標記價或成交價)。The working type: mark price or contract price.</summary>
+    private const string WorkingTypeField = "wt";
+
+    /// <summary>
+    /// 觸發後撮合引擎裡那張實際委託的編號。未觸發時是空字串。
+    /// The id of the real order in the matching engine once triggered; an empty string before that.
+    /// </summary>
+    private const string ActualOrderIdField = "ai";
+
+    /// <summary>觸發時間。未觸發時是 0。The trigger time; 0 before the trigger.</summary>
+    private const string TriggerTimeField = "tt";
+
+    /// <summary>
+    /// 條件單被拒的原因。
+    /// The reason a conditional order failed.
+    /// </summary>
+    /// <remarks>
+    /// 這是 <c>CONDITIONAL_ORDER_TRIGGER_REJECT</c> 在 2025-12-15 棄用之後,拒絕原因唯一的去處。
+    /// This is where rejection reasons went after <c>CONDITIONAL_ORDER_TRIGGER_REJECT</c> was retired on
+    /// 2025-12-15, and the only place they appear.
+    /// </remarks>
+    private const string RejectReasonField = "rm";
+
     private const string OrderTradeTimeField = "T";
 
     private const string LastFilledQuantityField = "l";
@@ -322,6 +356,7 @@ internal static class BinanceUserDataReader
             return eventType switch
             {
                 BinanceUserDataPaths.OrderTradeUpdateEvent => ReadOrderTradeUpdate(root, eventTime),
+                BinanceUserDataPaths.AlgoUpdateEvent => ReadAlgoUpdate(root, eventTime),
                 BinanceUserDataPaths.AccountUpdateEvent => ReadAccountUpdate(root, eventTime),
                 BinanceUserDataPaths.MarginCallEvent => ReadMarginCall(root, eventTime),
                 BinanceUserDataPaths.ListenKeyExpiredEvent =>
@@ -329,6 +364,170 @@ internal static class BinanceUserDataReader
                 _ => Result.Success(BinanceUserDataEvent.FromUnknown(eventTime)),
             };
         }
+    }
+
+    /// <summary>
+    /// 判讀 <c>ALGO_UPDATE</c>(條件單狀態變化)。
+    /// Reads an <c>ALGO_UPDATE</c>, the conditional order state change.
+    /// </summary>
+    /// <param name="root">事件物件。The event object.</param>
+    /// <param name="eventTime">事件時間。The event time.</param>
+    /// <returns>判讀結果,或失敗原因。The outcome, or the reason it failed.</returns>
+    /// <remarks>
+    /// <para>
+    /// 欄位對映(來源:官方 USDⓈ-M Futures User Data Streams 文件,擷取日期 2026-09-14):
+    /// <c>o.caid</c> 用戶端條件單編號、<c>o.aid</c> 交易所條件單編號、<c>o.o</c> 委託類型、
+    /// <c>o.X</c> 條件單狀態、<c>o.ai</c> 觸發後的實際委託編號(未觸發時是空字串)、
+    /// <c>o.tp</c> 觸發價、<c>o.p</c> 委託價、<c>o.wt</c> 觸發價種類、<c>o.tt</c> 觸發時間(未觸發時是 0)、
+    /// <c>o.rm</c> 被拒原因。
+    /// The field mapping, from the official USDⓈ-M Futures User Data Streams documentation retrieved
+    /// 2026-09-14: <c>o.caid</c> client algo id, <c>o.aid</c> exchange algo id, <c>o.o</c> order type,
+    /// <c>o.X</c> algo status, <c>o.ai</c> the real order id once triggered (an empty string before that),
+    /// <c>o.tp</c> trigger price, <c>o.p</c> order price, <c>o.wt</c> working type, <c>o.tt</c> trigger time
+    /// (0 before the trigger), and <c>o.rm</c> the rejection reason.
+    /// </para>
+    /// <para>
+    /// <b>外層的 <c>o</c> 是物件,內層還有一個 <c>o</c> 是委託類型字串。</b>同名不同層,讀錯一層拿到的是
+    /// 一個型別不符的元素而不是例外 —— 這正是為什麼這裡先取出 <c>o</c> 物件再從它身上讀欄位,
+    /// 而不是在根物件上找。
+    /// <b>The outer <c>o</c> is an object and the inner <c>o</c> is the order type string.</b> Same name, two
+    /// levels; reading the wrong one yields an element of the wrong kind rather than an exception, which is why
+    /// the <c>o</c> object is taken out first and every field read from it rather than from the root.
+    /// </para>
+    /// <para>
+    /// <b>移動停損在觸發前會推<b>兩</b>則 <c>X=NEW</c>。</b>官方 change-log 2026-08-21 說明 <c>o.ia</c>
+    /// (是否已啟動)從佔位欄位變成真的會動:先來一則 <c>ia:false</c>,啟動之後再來一則 <c>ia:true</c>。
+    /// 消費端若要去重,鍵必須含 <c>ia</c>,只用「條件單編號 + 狀態」會把第二則吃掉。
+    /// <b>A trailing stop pushes <b>two</b> <c>X=NEW</c> events before triggering.</b> The change-log of
+    /// 2026-08-21 records <c>o.ia</c> — whether the order has activated — graduating from a placeholder to a
+    /// live field: one event arrives with <c>ia:false</c> and another with <c>ia:true</c> once it activates.
+    /// A consumer that de-duplicates must include <c>ia</c> in the key, or the second event is swallowed.
+    /// </para>
+    /// <para>
+    /// <b>條件單被拒的原因只在這裡出現一次。</b>官方 change-log 2025-12-10 說明
+    /// <c>CONDITIONAL_ORDER_TRIGGER_REJECT</c> 自 2025-12-15 起棄用,拒絕原因改放進這個事件的
+    /// <c>o.rm</c>。事後再查那張條件單只會得到一個「已拒絕」,看不出為什麼。
+    /// <b>The reason a conditional order was rejected appears exactly once, here.</b> The change-log of
+    /// 2025-12-10 records <c>CONDITIONAL_ORDER_TRIGGER_REJECT</c> being retired on 2025-12-15, with rejection
+    /// reasons moving into this event's <c>o.rm</c>. Looking the order up afterwards yields a bare "rejected".
+    /// </para>
+    /// </remarks>
+    private static Result<BinanceUserDataEvent> ReadAlgoUpdate(JsonElement root, DateTimeOffset eventTime)
+    {
+        if (!root.TryGetProperty(OrderField, out var algo) || algo.ValueKind != JsonValueKind.Object)
+        {
+            return BinanceErrors.MissingField(OrderField, BinanceUserDataPaths.Context);
+        }
+
+        if (!BinanceJson.TryGetString(algo, SymbolField, out var symbol))
+        {
+            return BinanceErrors.MissingField(SymbolField, BinanceUserDataPaths.Context);
+        }
+
+        if (!BinanceJson.TryGetString(algo, ClientAlgoIdField, out var clientAlgoId))
+        {
+            return WithSymbol(BinanceErrors.MissingField(ClientAlgoIdField, symbol), symbol);
+        }
+
+        var statusText = BinanceJson.TryGetString(algo, OrderStatusField, out var readStatus) ? readStatus : null;
+        var status = BinanceAlgoOrderMapper.ParseAlgoStatus(statusText);
+
+        if (status == ConditionalOrderStatus.Unspecified)
+        {
+            return WithSymbol(
+                BinanceErrors.MalformedResponse(
+                        $"{symbol} 的條件單狀態「{statusText}」無法對映到任何已知狀態。The algo status \"{statusText}\" on {symbol} maps to no known state.")
+                    .WithData(BinanceErrorDataKeys.Field, OrderStatusField),
+                symbol);
+        }
+
+        var sideText = BinanceJson.TryGetString(algo, SideField, out var readSide) ? readSide : null;
+        var side = BinanceOrderMapper.ParseOrderSide(sideText);
+
+        if (side == OrderSide.Unspecified)
+        {
+            return WithSymbol(
+                BinanceErrors.MalformedResponse(
+                        $"{symbol} 的買賣方向「{sideText}」無法對映。The order side \"{sideText}\" on {symbol} maps to nothing.")
+                    .WithData(BinanceErrorDataKeys.Field, SideField),
+                symbol);
+        }
+
+        var typeText = BinanceJson.TryGetString(algo, OrderTypeField, out var readType) ? readType : null;
+        var conditionalOrderType = BinanceAlgoOrderMapper.ParseConditionalOrderType(typeText);
+
+        if (conditionalOrderType == ConditionalOrderType.Unspecified)
+        {
+            // 類型不放行:條件單的類型就是「它會在什麼時候、以什麼方式動用部位」,不知道類型等於不知道
+            // 這張單會做什麼。這條串流已經以 algoType 之外的事件為 Ignored,走到這裡的都該是條件單。
+            // The type is not let through: a conditional order's type is when and how it will move the
+            // position, and not knowing it is not knowing what the order will do. Events that are not
+            // conditional orders are already classified as Ignored, so anything reaching here should be one.
+            return WithSymbol(
+                BinanceErrors.MalformedResponse(
+                        $"{symbol} 的條件單類型「{typeText}」無法對映到任何已知類型。The conditional order type \"{typeText}\" on {symbol} maps to no known type.")
+                    .WithData(BinanceErrorDataKeys.Field, OrderTypeField),
+                symbol);
+        }
+
+        var conditionalOrder = new ConditionalOrder
+        {
+            Symbol = symbol,
+            ClientConditionalOrderId = clientAlgoId,
+
+            // aid 是數值,中立模型用字串裝 —— 別的交易所的編號不一定是數字。
+            // The id is numeric here while the neutral model stores a string, because other exchanges do not
+            // necessarily use numbers.
+            ExchangeConditionalOrderId = BinanceJson.TryGetInt64(algo, AlgoIdField, out var algoId)
+                ? algoId.ToString(CultureInfo.InvariantCulture)
+                : null,
+            Side = side,
+            ConditionalOrderType = conditionalOrderType,
+            Status = status,
+            PositionSide = BinanceOrderMapper.ParsePositionSide(
+                BinanceJson.TryGetString(algo, PositionSideField, out var positionSide) ? positionSide : null),
+            TimeInForce = BinanceOrderMapper.ParseTimeInForce(
+                BinanceJson.TryGetString(algo, TimeInForceField, out var timeInForce) ? timeInForce : null),
+            Quantity = BinanceJson.TryGetDecimal(algo, OriginalQuantityField, out var quantity) ? quantity : 0m,
+            TriggerPrice = ReadOptionalPrice(algo, TriggerPriceField),
+            TriggerPriceType = ParseWorkingType(
+                BinanceJson.TryGetString(algo, WorkingTypeField, out var workingType) ? workingType : null),
+            Price = ReadOptionalPrice(algo, PriceField),
+            ReduceOnly = BinanceJson.TryGetBoolean(algo, ReduceOnlyField, out var reduceOnly) && reduceOnly,
+            ClosePosition = BinanceJson.TryGetBoolean(algo, ClosePositionField, out var closePosition)
+                && closePosition,
+
+            // ai 在未觸發時是空字串,不是省略也不是 0。照抄成 "" 會讓上層拿一個空字串去查單。
+            // ai is an empty string before the trigger, neither absent nor zero. Passing it through sends the
+            // caller to look up "".
+            TriggeredOrderId = ReadNonEmptyString(algo, ActualOrderIdField),
+
+            // tt 未觸發時是 0,而 0 在 Unix 毫秒是 1970 年 —— 直接轉換會讓一張還沒觸發的停損看起來
+            // 像是五十年前就觸發過了。
+            // tt is 0 before the trigger, and zero in Unix milliseconds is 1970: converting it directly makes
+            // an untriggered stop look as though it fired half a century ago.
+            TriggeredAt = ReadOptionalTimestamp(algo, TriggerTimeField),
+
+            // 這個事件不帶條件單的建立時間,兩個時間只好同值 —— 與 ORDER_TRADE_UPDATE 同樣的取捨。
+            // The event carries no creation time, so both timestamps share one value, as on
+            // ORDER_TRADE_UPDATE.
+            CreatedAt = eventTime,
+            UpdatedAt = eventTime,
+        };
+
+        return Result.Success(BinanceUserDataEvent.FromConditionalOrder(
+            new ConditionalOrderUpdate
+            {
+                ConditionalOrder = conditionalOrder,
+                RawStatus = statusText,
+
+                // rm 在沒有被拒的事件上是空字串或不存在。空字串當成「沒有原因」,不是「原因是空的」。
+                // rm is absent or empty on an event that is not a rejection. An empty string means there is no
+                // reason rather than that the reason is blank.
+                RejectReason = ReadNonEmptyString(algo, RejectReasonField),
+                Timestamp = eventTime,
+            },
+            eventTime));
     }
 
     private static Result<BinanceUserDataEvent> ReadOrderTradeUpdate(JsonElement root, DateTimeOffset eventTime)
@@ -884,6 +1083,58 @@ internal static class BinanceUserDataReader
 
     private static decimal? ReadOptionalPrice(JsonElement element, string propertyName) =>
         BinanceJson.TryGetDecimal(element, propertyName, out var value) && value > 0m ? value : null;
+
+    /// <summary>
+    /// 把幣安的 <c>wt</c>(<c>workingType</c>)轉回中立的觸發價種類。
+    /// Converts a Binance <c>wt</c> (<c>workingType</c>) back into the neutral trigger price type.
+    /// </summary>
+    /// <param name="value">幣安回傳的字串。The string Binance returned.</param>
+    /// <returns>
+    /// 對映得到的種類;對不上時為 <see cref="TriggerPriceType.LastPrice"/>。
+    /// The mapped type, falling back to <see cref="TriggerPriceType.LastPrice"/>.
+    /// </returns>
+    /// <remarks>
+    /// 退路是成交價而不是標記價,因為<b>幣安的預設就是 <c>CONTRACT_PRICE</c></b>。退成標記價會讓一張
+    /// 實際看成交價的停損被回報成「看標記價」,而那正是「為什麼被一根影線掃掉」查不出原因的來源。
+    /// The fallback is the traded price rather than the mark price because <b>Binance's own default is
+    /// <c>CONTRACT_PRICE</c></b>. Falling back to the mark price would report a stop that really watches traded
+    /// prices as watching the mark, which is exactly what makes "why did a single wick take it out"
+    /// unanswerable.
+    /// </remarks>
+    private static TriggerPriceType ParseWorkingType(string? value) => value switch
+    {
+        "MARK_PRICE" => TriggerPriceType.MarkPrice,
+        _ => TriggerPriceType.LastPrice,
+    };
+
+    /// <summary>
+    /// 讀一個交易所以空字串表示「沒有」的字串欄位。
+    /// Reads a string field the exchange writes as an empty string to mean "none".
+    /// </summary>
+    /// <param name="element">所在的物件。The containing object.</param>
+    /// <param name="propertyName">欄位名。The property name.</param>
+    /// <returns>讀到的值,或 <see langword="null"/>。The value, or <see langword="null"/>.</returns>
+    private static string? ReadNonEmptyString(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetString(element, propertyName, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : null;
+
+    /// <summary>
+    /// 讀一個交易所以 0 表示「還沒發生」的時間欄位。
+    /// Reads a timestamp the exchange writes as 0 to mean "has not happened yet".
+    /// </summary>
+    /// <param name="element">所在的物件。The containing object.</param>
+    /// <param name="propertyName">欄位名。The property name.</param>
+    /// <returns>讀到的時刻,或 <see langword="null"/>。The instant, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// 0 在 Unix 毫秒是 1970 年。直接轉換不會失敗,只會讓一張還沒觸發的停損看起來像五十年前就觸發過了。
+    /// Zero in Unix milliseconds is 1970. Converting it directly does not fail; it merely makes an untriggered
+    /// stop look as though it fired half a century ago.
+    /// </remarks>
+    private static DateTimeOffset? ReadOptionalTimestamp(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetInt64(element, propertyName, out var milliseconds) && milliseconds > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(milliseconds)
+            : null;
 
     /// <summary>
     /// 讀一個交易所可能不給的數值;缺席時為 <see langword="null"/>,不是零。

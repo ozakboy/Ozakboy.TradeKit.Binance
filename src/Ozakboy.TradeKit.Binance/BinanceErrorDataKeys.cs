@@ -67,4 +67,19 @@ public static class BinanceErrorDataKeys
     /// with the failure, and the order becomes a position that can be neither looked up nor cancelled.
     /// </remarks>
     public const string ClientOrderId = "binanceClientOrderId";
+
+    /// <summary>
+    /// 條件單送出失敗時,那張單使用的用戶端條件單編號(冪等識別碼)。
+    /// The client algo id — the idempotency key — that a failed conditional order submission used.
+    /// </summary>
+    /// <remarks>
+    /// 存在的理由與 <see cref="ClientOrderId"/> 相同,而後果更嚴重:停損送單逾時之後,那張停損可能已經
+    /// 掛在交易所。少了這一項,自動產生的編號會隨著失敗一起消失,那張停損就成了一個既查不到也撤不掉、
+    /// 卻會在某個價位真的動用部位的東西。
+    /// It exists for the same reason as <see cref="ClientOrderId"/>, with worse consequences: after a stop's
+    /// submission times out the stop may already be resting at the exchange. Without this key an
+    /// auto-generated id vanishes with the failure, leaving a stop that can be neither looked up nor cancelled
+    /// and that will nevertheless move the position at some price.
+    /// </remarks>
+    public const string ClientAlgoId = "binanceClientAlgoId";
 }

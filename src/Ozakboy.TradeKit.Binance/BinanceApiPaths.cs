@@ -58,6 +58,49 @@ internal static class BinanceApiPaths
     /// <summary>撤銷某商品的全部掛單。Cancel every open order on one symbol.</summary>
     public const string AllOpenOrders = "fapi/v1/allOpenOrders";
 
+    /// <summary>
+    /// 單張條件單。<c>POST</c> 下單、<c>GET</c> 查單、<c>DELETE</c> 撤單共用這一個路徑。
+    /// One conditional order: <c>POST</c> places, <c>GET</c> queries, and <c>DELETE</c> cancels, all on this
+    /// single path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 條件單(<c>STOP_MARKET</c>、<c>TAKE_PROFIT_MARKET</c>、<c>STOP</c>、<c>TAKE_PROFIT</c>、
+    /// <c>TRAILING_STOP_MARKET</c>)已經不由 <see cref="Order"/> 那個端點受理,送過去一律回
+    /// <see cref="BinanceApiErrorCodes.OrderTypeNotSupportedOnEndpoint"/>(<c>-4120</c>)。
+    /// 它們改走這裡,並且帶 <c>algoType=CONDITIONAL</c>。
+    /// Conditional orders no longer go through the <see cref="Order"/> endpoint, which answers
+    /// <see cref="BinanceApiErrorCodes.OrderTypeNotSupportedOnEndpoint"/> (<c>-4120</c>) for every one of them.
+    /// They travel here instead, carrying <c>algoType=CONDITIONAL</c>.
+    /// </para>
+    /// <para>
+    /// 與 <see cref="Order"/> 同樣是三個操作共用一個路徑,同樣的警告成立:方法寫錯不會 404,
+    /// 而是變成<b>另一個操作</b>。把撤停損寫成 <c>POST</c> 就是再掛一張停損上去。
+    /// Three operations share one path exactly as on <see cref="Order"/>, with the same warning: a wrong method
+    /// does not 404 but performs <b>a different operation</b>. Cancelling a stop with <c>POST</c> places one
+    /// more stop.
+    /// </para>
+    /// </remarks>
+    public const string AlgoOrder = "fapi/v1/algoOrder";
+
+    /// <summary>查詢未觸發的條件單。Query open conditional orders.</summary>
+    public const string OpenAlgoOrders = "fapi/v1/openAlgoOrders";
+
+    /// <summary>查詢條件單歷史。Query the conditional order history.</summary>
+    public const string AllAlgoOrders = "fapi/v1/allAlgoOrders";
+
+    /// <summary>
+    /// 撤銷某商品的全部條件單。Cancel every open conditional order on one symbol.
+    /// </summary>
+    /// <remarks>
+    /// 與 <see cref="AllOpenOrders"/> 是<b>兩個</b>端點,互不涵蓋。緊急出場要兩個都打,
+    /// 只打一個會留下另一邊 —— 留下的若是停損,部位平掉之後它會反手開倉。
+    /// This and <see cref="AllOpenOrders"/> are <b>two</b> endpoints and neither covers the other. An emergency
+    /// exit calls both; calling one leaves the other side resting, and a surviving stop opens an inverted
+    /// position once the original closes.
+    /// </remarks>
+    public const string AllOpenAlgoOrders = "fapi/v1/algoOpenOrders";
+
     /// <summary>調整槓桿倍數。Change the leverage.</summary>
     public const string Leverage = "fapi/v1/leverage";
 

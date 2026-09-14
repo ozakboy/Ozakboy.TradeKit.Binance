@@ -36,3 +36,7 @@ desktop.ini
 *.pem
 *.pfx
 *.key
+
+# 暫時性:Abstractions 0.4.0 發佈前,還原目的地由 NuGet.config 指到這裡,連同該檔一起刪除。
+# TEMPORARY: restore target while Abstractions 0.4.0 is unpublished; remove along with NuGet.config.
+/.nuget-packages/
