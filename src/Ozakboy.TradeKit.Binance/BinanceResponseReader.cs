@@ -114,8 +114,8 @@ public static class BinanceResponseReader
     }
 
     /// <summary>
-    /// 解析 <c>/fapi/v2/account</c> 的回應中的資產餘額與帳戶旗標。
-    /// Parses the asset balances and account flags from the <c>/fapi/v2/account</c> response.
+    /// 解析 <c>/fapi/v2/account</c> 的回應中的資產餘額、保證金總額與帳戶旗標。
+    /// Parses the asset balances, margin totals, and account flags from the <c>/fapi/v2/account</c> response.
     /// </summary>
     /// <param name="json">回應本文。The response body.</param>
     /// <param name="positions">另行取得的持倉。The positions fetched separately.</param>
@@ -142,6 +142,15 @@ public static class BinanceResponseReader
     /// <see cref="AccountSnapshot.IsHedgeMode"/> is inferred from the positions' <c>positionSide</c>: any
     /// <c>LONG</c> or <c>SHORT</c> means hedge mode, all <c>BOTH</c> means one-way. The dedicated endpoint
     /// costs a weight of 30, six times the whole account query, which is poor value for one boolean.
+    /// </para>
+    /// <para>
+    /// 維持保證金與起始保證金讀自頂層的 <c>totalMaintMargin</c>、<c>totalInitialMargin</c> 與
+    /// <c>assets[]</c> 每項的 <c>maintMargin</c>、<c>initialMargin</c>。這幾個欄位缺漏或讀不懂時對應成
+    /// <see langword="null"/>(未知),不讓整份快照失敗,也不填 0;<c>"0.00000000"</c> 則是交易所明確給的零,讀成 0。
+    /// The maintenance and initial margins come from the top-level <c>totalMaintMargin</c> and
+    /// <c>totalInitialMargin</c> and from each <c>assets[]</c> entry's <c>maintMargin</c> and <c>initialMargin</c>.
+    /// A missing or unreadable field maps to <see langword="null"/> — unknown — without failing the snapshot and
+    /// without becoming zero, while <c>"0.00000000"</c> is a zero the exchange stated and reads as 0.
     /// </para>
     /// </remarks>
     public static Result<AccountSnapshot> ReadAccountSnapshot(
@@ -193,6 +202,8 @@ public static class BinanceResponseReader
                 Positions = positions,
                 IsHedgeMode = positions.Any(static position => position.Side != PositionSide.Both),
                 CanTrade = !BinanceJson.TryGetBoolean(root, "canTrade", out var canTrade) || canTrade,
+                TotalMaintenanceMargin = ReadOptionalAmount(root, "totalMaintMargin"),
+                TotalInitialMargin = ReadOptionalAmount(root, "totalInitialMargin"),
                 TakenAt = takenAt,
             };
         }
@@ -935,8 +946,26 @@ public static class BinanceResponseReader
             WalletBalance = walletBalance,
             AvailableBalance = availableBalance,
             UnrealizedPnl = unrealizedProfit,
+            MaintenanceMargin = ReadOptionalAmount(element, "maintMargin"),
+            InitialMargin = ReadOptionalAmount(element, "initialMargin"),
         };
     }
+
+    /// <summary>
+    /// 讀取選填的金額欄位:讀不到時為 <see langword="null"/>,讀到 0 就是 0。
+    /// Reads an optional amount: <see langword="null"/> when it cannot be read, and zero when it reads zero.
+    /// </summary>
+    /// <remarks>
+    /// 刻意與 <see cref="ReadOptionalPrice"/> 不同 —— 那邊把 0 視為「沒有價格」,這邊的 0 是交易所明確回報的
+    /// 「沒有保證金需求」,必須原樣保留。反過來,欄位缺漏或格式讀不懂時一律給 <see langword="null"/>,
+    /// 不填 0:維持保證金被當成 0,風控會讀成這個帳戶沒有強平風險。
+    /// Deliberately unlike <see cref="ReadOptionalPrice"/>, which treats zero as "no price": here zero is the
+    /// exchange stating that no margin is required and has to be kept as is. Conversely, a missing or unreadable
+    /// field always yields <see langword="null"/> rather than zero, because a maintenance margin read as zero tells
+    /// risk control the account carries no liquidation risk.
+    /// </remarks>
+    private static decimal? ReadOptionalAmount(JsonElement element, string propertyName) =>
+        BinanceJson.TryGetDecimal(element, propertyName, out var value) ? value : null;
 
     private static Result<Position> ReadPosition(JsonElement element, DateTimeOffset asOf)
     {

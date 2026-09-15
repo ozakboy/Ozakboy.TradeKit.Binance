@@ -288,6 +288,11 @@ Testnet 與主網的交易規則不同。2026-09-11 實測:`BTCUSDT` 的 `stepSi
 帳戶端點自己的 `positions[]` 沒有 `markPrice` 也沒有 `liquidationPrice`,
 照它建出來的 `Position` 名目價值會是零 —— 而「名目價值為零」在風控眼中等於「沒有部位風險」。
 
+同一次帳戶查詢也會填入維持保證金與起始保證金:`AccountSnapshot.TotalMaintenanceMargin`、`TotalInitialMargin`
+讀自 `totalMaintMargin`、`totalInitialMargin`,每個 `Balance` 的 `MaintenanceMargin`、`InitialMargin` 讀自
+`assets[]` 對應的那一筆。保證金率就是 `Balance.MarginBalance / MaintenanceMargin`。幣安沒給的欄位是 `null`,
+絕不是 0 —— 0 是幣安對空手帳戶的回報,猜一個 0 會讓風控讀成沒有強平風險。
+
 ### 下單絕不重試,其餘都可以
 
 這是整個套件最不能妥協的一條。**逾時不代表對方沒收到** —— 那張單可能已經在簿上,甚至已經成交,

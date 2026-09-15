@@ -8,6 +8,56 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-15
+
+**帳戶快照帶上維持保證金與起始保證金。**
+**Account snapshots now carry the maintenance and initial margin.**
+
+`/fapi/v2/account` 一直都有回這幾個數字,只是 `Ozakboy.TradeKit.Abstractions` 0.4.0 的模型沒有地方放,
+下游算保證金率只能拿起始保證金代替 —— 起始保證金遠大於維持保證金,保證金率被低估,風控會過早擋單。
+`/fapi/v2/account` has always returned these figures; the `Ozakboy.TradeKit.Abstractions` 0.4.0 model simply had
+nowhere to put them, so downstream margin ratios had to use the initial margin instead. That figure is far larger,
+so the ratio was understated and risk control blocked orders too early.
+
+### 新增功能 / Added
+
+- **`GetAccountSnapshotAsync` 填入保證金 / Margin figures on `GetAccountSnapshotAsync`**:
+  `AccountSnapshot.TotalMaintenanceMargin` 與 `TotalInitialMargin` 讀自頂層的 `totalMaintMargin`、`totalInitialMargin`;
+  每個 `Balance` 的 `MaintenanceMargin` 與 `InitialMargin` 讀自 `assets[]` 的 `maintMargin`、`initialMargin`。
+  沒有多打任何端點,權重不變。
+  `AccountSnapshot.TotalMaintenanceMargin` and `TotalInitialMargin` come from the top-level `totalMaintMargin` and
+  `totalInitialMargin`, and each `Balance`'s `MaintenanceMargin` and `InitialMargin` from the `maintMargin` and
+  `initialMargin` of its `assets[]` entry. No extra endpoint is called and the weight is unchanged.
+- **缺值是 `null`,不是 0 / A missing value is `null`, not zero**:這幾個欄位缺漏或讀不懂時對應成 `null`(未知),
+  快照照樣解析成功;`"0.00000000"` 是交易所明確給的零(帳戶空手),讀成 `0`。缺值填 0 會讓風控讀成「沒有維持保證金需求」,
+  也就是沒有強平風險。其他既有的必填欄位(`asset`、`walletBalance`、`availableBalance`、`unrealizedProfit`)照舊,
+  缺了仍然解析失敗。
+  A missing or unreadable field maps to `null` — unknown — and the snapshot still parses, while `"0.00000000"` is a
+  zero the exchange stated for a flat account and reads as `0`. Filling a gap with zero would read as "no maintenance
+  margin required", which is to say no liquidation risk. The existing mandatory fields (`asset`, `walletBalance`,
+  `availableBalance`, `unrealizedProfit`) are unchanged and still fail the parse when absent.
+- **`assets[].marginBalance` 不另外讀 / `assets[].marginBalance` is not read separately**:`Balance.MarginBalance`
+  原本就是 `WalletBalance + UnrealizedPnl` 的計算屬性,與交易所給的 `marginBalance` 相同;改成讀欄位會改變既有成員的語意,
+  所以維持原樣。
+  `Balance.MarginBalance` was already the computed `WalletBalance + UnrealizedPnl`, which equals the exchange's
+  `marginBalance`; reading the field instead would change the meaning of an existing member, so it stays as it is.
+
+### 技術改進 / Changed
+
+- **相依升上 `Ozakboy.TradeKit.Abstractions` 0.5.0 / Moves to `Ozakboy.TradeKit.Abstractions` 0.5.0**:
+  那一版只新增預設 `null` 的屬性,不是破壞性變更;本套件的公開 API 沒有改動簽章。
+  That release only adds properties defaulting to `null` and is not breaking; no signature in this package's public
+  API changed.
+- **測試 / Tests**:`BinanceResponseReaderTests` 新增 10 條,以 2026-09-15 Testnet 唯讀實測的欄位形狀
+  (字串小數、同時含 `0.00000000`、缺欄位的資產)建立內嵌回應,斷言非零值讀進模型、`0.00000000` 讀成 `0m`
+  而不是 `null`、缺欄位與讀不懂的值是 `null` 且快照不失敗;錄製檔 `account.json` 另外證明實錄的零讀成 `0m`。
+  單元測試 860 → 870 全綠。本版未執行 Testnet 與 `MainnetPublic` 整合測試。
+  Ten new tests build an inline response in the field shape observed on a read-only Testnet check on 2026-09-15 —
+  string decimals, `0.00000000` values, and an asset missing the fields — and assert that non-zero figures reach the
+  model, that `0.00000000` reads as `0m` rather than `null`, and that missing or unreadable values are `null` without
+  failing the snapshot; the recorded `account.json` separately shows its recorded zeros read as `0m`. Unit tests go
+  from 860 to 870, all green. The Testnet and `MainnetPublic` integration tests were not run for this release.
+
 ## [0.2.1] - 2026-09-14
 
 **升上 `Ozakboy.Http` 0.3.3:自己關掉簽章組公開行情用戶端時,查詢參數不再消失。**

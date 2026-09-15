@@ -228,6 +228,175 @@ public sealed class BinanceResponseReaderTests
         Assert.AreEqual(0.01000000m, btc.WalletBalance);
     }
 
+    // ── 維持保證金 / Maintenance margin ────────────────────────────────────
+
+    /// <summary>
+    /// 帳戶持有部位時的 <c>/fapi/v2/account</c>:欄位名稱與字串小數的形狀照 2026-09-15 Testnet 唯讀實測,
+    /// 數值換成非零,供「非零的值真的有被讀進模型」的斷言使用;錄製檔 <c>account.json</c> 全是零,證明不了這件事。
+    /// An <c>/fapi/v2/account</c> body for an account holding a position. Field names and the string-decimal form
+    /// follow a read-only Testnet check on 2026-09-15, with non-zero values substituted so that a non-zero figure
+    /// can be shown to reach the model; the recorded <c>account.json</c> is all zeros and cannot show that.
+    /// </summary>
+    private const string AccountWithMargin = """
+        {
+          "canTrade": true,
+          "totalInitialMargin": "375.25000000",
+          "totalMaintMargin": "30.02000000",
+          "totalWalletBalance": "5000.00000000",
+          "totalUnrealizedProfit": "-12.50000000",
+          "totalMarginBalance": "4987.50000000",
+          "totalPositionInitialMargin": "375.25000000",
+          "totalOpenOrderInitialMargin": "0.00000000",
+          "totalCrossWalletBalance": "5000.00000000",
+          "totalCrossUnPnl": "-12.50000000",
+          "availableBalance": "4612.25000000",
+          "maxWithdrawAmount": "4612.25000000",
+          "assets": [
+            {
+              "asset": "USDT",
+              "walletBalance": "5000.00000000",
+              "unrealizedProfit": "-12.50000000",
+              "marginBalance": "4987.50000000",
+              "maintMargin": "30.02000000",
+              "initialMargin": "375.25000000",
+              "positionInitialMargin": "375.25000000",
+              "openOrderInitialMargin": "0.00000000",
+              "maxWithdrawAmount": "4612.25000000",
+              "crossWalletBalance": "5000.00000000",
+              "crossUnPnl": "-12.50000000",
+              "availableBalance": "4612.25000000",
+              "marginAvailable": true,
+              "updateTime": 1789066385549
+            },
+            {
+              "asset": "USDC",
+              "walletBalance": "5000.00000000",
+              "unrealizedProfit": "0.00000000",
+              "marginBalance": "5000.00000000",
+              "maintMargin": "0.00000000",
+              "initialMargin": "0.00000000",
+              "positionInitialMargin": "0.00000000",
+              "openOrderInitialMargin": "0.00000000",
+              "maxWithdrawAmount": "5000.00000000",
+              "crossWalletBalance": "5000.00000000",
+              "crossUnPnl": "0.00000000",
+              "availableBalance": "5000.00000000",
+              "marginAvailable": true,
+              "updateTime": 1789066385650
+            },
+            {
+              "asset": "BTC",
+              "walletBalance": "0.01000000",
+              "unrealizedProfit": "0.00000000",
+              "availableBalance": "0.01000000",
+              "updateTime": 1789066385760
+            }
+          ],
+          "positions": []
+        }
+        """;
+
+    [TestMethod]
+    public void ReadsTheMaintenanceAndInitialMarginFromTheAccountPayload()
+    {
+        var snapshot = BinanceResponseReader.ReadAccountSnapshot(AccountWithMargin, [], AsOf).GetValueOrThrow();
+
+        Assert.AreEqual(30.02m, snapshot.TotalMaintenanceMargin);
+        Assert.AreEqual(375.25m, snapshot.TotalInitialMargin);
+
+        var usdt = snapshot.GetBalance("USDT").GetValueOrThrow();
+
+        Assert.AreEqual(30.02m, usdt.MaintenanceMargin);
+        Assert.AreEqual(375.25m, usdt.InitialMargin);
+
+        // 保證金餘額仍由錢包餘額加未實現損益算出,與交易所給的 marginBalance 一致。
+        // The margin balance is still wallet plus unrealised PnL, matching the exchange's own marginBalance.
+        Assert.AreEqual(4987.5m, usdt.MarginBalance);
+    }
+
+    [TestMethod]
+    public void AStatedZeroMarginReadsAsZeroNotAsUnknown()
+    {
+        // "0.00000000" 是交易所明確給的零(帳戶空手),必須是 0m 而不是 null。
+        // "0.00000000" is a zero the exchange stated for a flat account: it has to be 0m, not null.
+        var recorded = BinanceResponseReader.ReadAccountSnapshot(Fixtures.Account, [], AsOf).GetValueOrThrow();
+
+        Assert.IsNotNull(recorded.TotalMaintenanceMargin);
+        Assert.AreEqual(0m, recorded.TotalMaintenanceMargin.Value);
+        Assert.IsNotNull(recorded.TotalInitialMargin);
+        Assert.AreEqual(0m, recorded.TotalInitialMargin.Value);
+
+        foreach (var balance in recorded.Balances)
+        {
+            Assert.IsNotNull(balance.MaintenanceMargin, $"{balance.Asset} 的 maintMargin 是 0.00000000,不該讀成 null。");
+            Assert.AreEqual(0m, balance.MaintenanceMargin.Value);
+            Assert.IsNotNull(balance.InitialMargin, $"{balance.Asset} 的 initialMargin 是 0.00000000,不該讀成 null。");
+            Assert.AreEqual(0m, balance.InitialMargin.Value);
+        }
+
+        var usdc = BinanceResponseReader
+            .ReadAccountSnapshot(AccountWithMargin, [], AsOf)
+            .GetValueOrThrow()
+            .GetBalance("USDC")
+            .GetValueOrThrow();
+
+        Assert.AreEqual(0m, usdc.MaintenanceMargin);
+        Assert.AreEqual(0m, usdc.InitialMargin);
+    }
+
+    [TestMethod]
+    public void AMissingMarginFieldReadsAsUnknownNotAsZero()
+    {
+        // BTC 那一筆沒有 maintMargin 與 initialMargin:缺值是 null。填 0 會讓風控讀成「沒有維持保證金需求」。
+        // The BTC entry carries neither field, so both are null; zero would read as "no maintenance margin needed".
+        var btc = BinanceResponseReader
+            .ReadAccountSnapshot(AccountWithMargin, [], AsOf)
+            .GetValueOrThrow()
+            .GetBalance("BTC")
+            .GetValueOrThrow();
+
+        Assert.IsNull(btc.MaintenanceMargin);
+        Assert.IsNull(btc.InitialMargin);
+    }
+
+    [TestMethod]
+    [DataRow("totalMaintMargin")]
+    [DataRow("totalInitialMargin")]
+    [DataRow("maintMargin")]
+    [DataRow("initialMargin")]
+    public void RemovingAMarginFieldLeavesTheSnapshotReadableWithThatFigureUnknown(string field)
+    {
+        // 保證金欄位不是必填:拿掉任何一個,快照照樣解析成功,只有對應的值變成 null。
+        // A margin field is not mandatory: without any one of them the snapshot still parses, and only the matching
+        // figure becomes null.
+        var json = AccountWithMargin.Replace($"\"{field}\":", $"\"{field}_removed\":", StringComparison.Ordinal);
+        var result = BinanceResponseReader.ReadAccountSnapshot(json, [], AsOf);
+
+        Assert.IsTrue(result.TryGetValue(out var snapshot), result.Error?.Message);
+
+        var usdt = snapshot.GetBalance("USDT").GetValueOrThrow();
+
+        Assert.AreEqual(field == "totalMaintMargin" ? (decimal?)null : 30.02m, snapshot.TotalMaintenanceMargin);
+        Assert.AreEqual(field == "totalInitialMargin" ? (decimal?)null : 375.25m, snapshot.TotalInitialMargin);
+        Assert.AreEqual(field == "maintMargin" ? (decimal?)null : 30.02m, usdt.MaintenanceMargin);
+        Assert.AreEqual(field == "initialMargin" ? (decimal?)null : 375.25m, usdt.InitialMargin);
+    }
+
+    [TestMethod]
+    [DataRow("\"not a number\"")]
+    [DataRow("null")]
+    [DataRow("\"\"")]
+    public void AnUnreadableMaintenanceMarginIsUnknownRatherThanZero(string value)
+    {
+        var json = AccountWithMargin
+            .Replace("\"totalMaintMargin\": \"30.02000000\"", $"\"totalMaintMargin\": {value}", StringComparison.Ordinal)
+            .Replace("\"maintMargin\": \"30.02000000\"", $"\"maintMargin\": {value}", StringComparison.Ordinal);
+        var snapshot = BinanceResponseReader.ReadAccountSnapshot(json, [], AsOf).GetValueOrThrow();
+
+        Assert.IsNull(snapshot.TotalMaintenanceMargin);
+        Assert.IsNull(snapshot.GetBalance("USDT").GetValueOrThrow().MaintenanceMargin);
+    }
+
     [TestMethod]
     public void PositionsComeFromTheCallerNotFromTheAccountPayload()
     {

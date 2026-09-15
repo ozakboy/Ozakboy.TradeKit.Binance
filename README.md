@@ -315,6 +315,12 @@ a combined weight of 10. The account endpoint's own `positions[]` carries neithe
 `liquidationPrice`, and a `Position` built from it would have a zero notional — which reads as no position risk
 at all.
 
+The same account call also fills the maintenance and initial margin: `AccountSnapshot.TotalMaintenanceMargin` and
+`TotalInitialMargin` from `totalMaintMargin` and `totalInitialMargin`, and each `Balance`'s `MaintenanceMargin` and
+`InitialMargin` from its `assets[]` entry. A margin ratio is `Balance.MarginBalance / MaintenanceMargin`. A field
+Binance leaves out comes back as `null`, never as zero — zero is what Binance reports for a flat account, and a
+guessed zero would read as no liquidation risk.
+
 ### Orders are never retried; everything else is
 
 This is the one rule the package will not bend. **A timeout does not mean the exchange missed it**: the order
